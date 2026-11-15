@@ -35,7 +35,9 @@ Native engine, mỗi event:
    `ABS_MT_POSITION_X/Y` với `max > min` (không loại vì `resolution=0` hay trục phụ `max=0`);
    `INPUT_PROP_DIRECT` chỉ dùng để xếp hạng (ưu tiên DIRECT, sau đó diện tích X*Y lớn nhất);
    log từng node: tên, EV bits, mọi trục ABS (min/max/res/fuzz/flat), cờ DIRECT, errno khi lỗi;
-2. tạo thiết bị uinput với **đúng** các bit EV/KEY/ABS và absinfo của máy thật;
+2. tạo thiết bị uinput với **đúng** các bit EV/KEY/ABS và absinfo của máy thật, kèm
+   `UI_SET_PROPBIT(INPUT_PROP_DIRECT)` — thiếu property này Android coi thiết bị là pointer/
+   touchpad và biến cảm ứng thành con trỏ chuột; set lỗi thì huỷ, **không grab**;
 3. **verify** thiết bị ảo mà không cần `/proc/bus/input/devices`: (a) `UI_GET_SYSNAME` +
    `/sys/devices/virtual/input/<sysname>` tồn tại, (b) so sánh danh sách `/dev/input` trước/sau
    `UI_DEV_CREATE` (kèm inotify, poll tối đa 1 s), (c) mở node mới và `EVIOCGNAME` khớp tên ảo;
@@ -107,7 +109,7 @@ Yêu cầu: Android Studio mới (AGP 8.5+), JDK 17, Android SDK 34, NDK 26.1.10
 APK debug: `app/build/outputs/apk/debug/app-debug.apk`.
 
 APK release đã ký (zipalign + Signature Scheme v2/v3):
-**`release/SensiTune-1.0.1.apk`** — xem `release/README.md` để biết fingerprint và cách verify/install.
+**`release/SensiTune-1.0.2.apk`** — xem `release/README.md` để biết fingerprint và cách verify/install.
 
 ### Test host cho phần dò ABS và JSON log
 
@@ -239,7 +241,8 @@ mà không cần làm gì.
   trục. Engine đọc bitmap vào buffer byte đã zero + log hex/errno, rồi **luôn** thử
   `EVIOCGABS` cho X/Y, slot, tracking id, pressure, touch/width major; range thật từ
   `EVIOCGABS` được dùng để tạo thiết bị ảo dù bitmap thiếu.
-- Không bắt buộc `INPUT_PROP_DIRECT`: thiếu cờ này chỉ làm thiết bị xếp hạng thấp hơn.
+- Thiết bị nguồn không bắt buộc `INPUT_PROP_DIRECT` (chỉ dùng để xếp hạng), nhưng thiết bị ảo
+  **bắt buộc** có property này để Android phân loại là touchscreen chứ không phải chuột.
 - Không cần đọc `/proc/bus/input/devices` (một số ROM Android 12 chặn shell đọc file này):
   verify dùng `UI_GET_SYSNAME`/sysfs, diff `/dev/input` + inotify, và `EVIOCGNAME` trên node mới.
 - Kernel < 4.5 thiếu `UI_ABS_SETUP` → tự fallback API `uinput_user_dev` cũ.

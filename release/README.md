@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| File | `SensiTune-1.0.1.apk` |
+| File | `SensiTune-1.0.2.apk` |
 | Package | `com.example.sensitune` |
-| versionCode / versionName | `2` / `1.0.1` |
+| versionCode / versionName | `3` / `1.0.2` |
 | minSdk / targetSdk / compileSdk | 26 / 34 / 34 |
 | ABI | `arm64-v8a`, `armeabi-v7a` |
 | Kích thước | ~1.6 MB |
@@ -17,7 +17,7 @@
 ## Kiểm tra chữ ký
 
 ```bash
-apksigner verify --verbose --print-certs release/SensiTune-1.0.1.apk
+apksigner verify --verbose --print-certs release/SensiTune-1.0.2.apk
 # Verified using v2 scheme (APK Signature Scheme v2): true
 # Verified using v3 scheme (APK Signature Scheme v3): true
 sha256sum -c release/SHA256SUMS.txt
@@ -26,7 +26,7 @@ sha256sum -c release/SHA256SUMS.txt
 ## Cài đặt
 
 ```bash
-adb install -r release/SensiTune-1.0.1.apk
+adb install -r release/SensiTune-1.0.2.apk
 ```
 
 APK này ký bằng chứng chỉ tự tạo, **khác** với bản debug (`./gradlew assembleDebug`).
@@ -34,7 +34,7 @@ Nếu máy đang cài bản debug cùng package, phải gỡ trước:
 
 ```bash
 adb uninstall com.example.sensitune
-adb install release/SensiTune-1.0.1.apk
+adb install release/SensiTune-1.0.2.apk
 ```
 
 ## Ghi chú bảo mật

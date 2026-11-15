@@ -832,6 +832,26 @@ static int create_virtual_device(const TouchCandidate *src, const char *name,
     set_bit(UI_SET_EVBIT, EV_KEY);
     set_bit(UI_SET_EVBIT, EV_ABS);
 
+    // Android classifies a uinput device that has ABS_MT_POSITION_X/Y but no
+    // INPUT_PROP_DIRECT as a pointer (touchpad): injected touches then move a
+    // mouse cursor instead of being delivered to the app as touches. Marking
+    // the device direct is what makes it a real touchscreen. Without this the
+    // whole engine silently degrades into a virtual mouse, so a failure here
+    // must abort before anything is grabbed.
+    errno = 0;
+    if (ioctl(fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT) < 0) {
+        int e = errno;
+        if (fail_code) *fail_code = SENSI_ERR_UINPUT_SETUP;
+        set_error(SENSI_ERR_UINPUT_SETUP,
+                  std::string("UI_SET_PROPBIT(INPUT_PROP_DIRECT) failed: ") +
+                  strerror(e) + " (errno=" + std::to_string(e) +
+                  ") - without it Android would treat the virtual device as a "
+                  "mouse/touchpad, so no grab was attempted");
+        close(fd);
+        return -1;
+    }
+    LOGI("uinput property INPUT_PROP_DIRECT set (device will be a touchscreen, not a mouse)");
+
     int min_x = 0, max_x = 4095, min_y = 0, max_y = 4095;
     std::vector<unsigned long> abs_bits;
     std::vector<unsigned long> key_bits;

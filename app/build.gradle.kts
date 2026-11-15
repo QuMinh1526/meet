@@ -15,8 +15,8 @@ android {
         // Bump versionCode on every AIDL/native change: Shizuku only recreates the
         // shell UserService when the version changes (otherwise the old process
         // with the old ISensiService transaction order keeps running).
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 3
+        versionName = "1.0.2"
 
         ndk {
             // arm64-v8a is the primary target. armeabi-v7a is built as well.
