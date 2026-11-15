@@ -31,10 +31,15 @@ Chỉ có 3 thứ để chỉnh: **bật/tắt**, **hệ số X**, **hệ số Y
 
 Native engine, mỗi event:
 
-1. quét `/dev/input/event*` bằng `EVIOCGBIT`, tìm thiết bị có `EV_ABS` +
-   `ABS_MT_POSITION_X/Y` + `INPUT_PROP_DIRECT`; log mọi ứng viên (min/max/res), chọn độ phân giải lớn nhất;
+1. quét `/dev/input/event*` bằng `EVIOCGBIT`, chấp nhận thiết bị có `EV_ABS` +
+   `ABS_MT_POSITION_X/Y` với `max > min` (không loại vì `resolution=0` hay trục phụ `max=0`);
+   `INPUT_PROP_DIRECT` chỉ dùng để xếp hạng (ưu tiên DIRECT, sau đó diện tích X*Y lớn nhất);
+   log từng node: tên, EV bits, mọi trục ABS (min/max/res/fuzz/flat), cờ DIRECT, errno khi lỗi;
 2. tạo thiết bị uinput với **đúng** các bit EV/KEY/ABS và absinfo của máy thật;
-3. **verify** thiết bị ảo xuất hiện trong `/proc/bus/input/devices` — chỉ sau đó mới `EVIOCGRAB`;
+3. **verify** thiết bị ảo mà không cần `/proc/bus/input/devices`: (a) `UI_GET_SYSNAME` +
+   `/sys/devices/virtual/input/<sysname>` tồn tại, (b) so sánh danh sách `/dev/input` trước/sau
+   `UI_DEV_CREATE` (kèm inotify, poll tối đa 1 s), (c) mở node mới và `EVIOCGNAME` khớp tên ảo;
+   một cách thành công là đủ — chỉ sau đó mới `EVIOCGRAB`, nếu không thì `UI_DEV_DESTROY`;
 4. đọc bằng `poll()` timeout 100 ms, gom đến `SYN_REPORT` rồi `write()` một lần;
 5. mỗi slot: `virt = raw` khi chạm xuống, `virt += (raw-last_raw)*k` khi di chuyển,
    clamp `[min,max]`, reset khi nhấc; mọi event khác (pressure, major, BTN_TOUCH, SYN) giữ nguyên;
@@ -215,8 +220,9 @@ mà không cần làm gì.
 
 - Cần `/dev/uinput` mở được từ uid 2000. Một số ROM chặn bằng SELinux → app báo **không hỗ trợ**
   và **không grab** (thà không chạy còn hơn grab mà không chắc).
-- Cần `INPUT_PROP_DIRECT` trên thiết bị cảm ứng; thiết bị lạ không có cờ này sẽ bị bỏ qua.
-- `/proc/bus/input/devices` phải đọc được để verify thiết bị ảo; nếu không, app từ chối grab.
+- Không bắt buộc `INPUT_PROP_DIRECT`: thiếu cờ này chỉ làm thiết bị xếp hạng thấp hơn.
+- Không cần đọc `/proc/bus/input/devices` (một số ROM Android 12 chặn shell đọc file này):
+  verify dùng `UI_GET_SYSNAME`/sysfs, diff `/dev/input` + inotify, và `EVIOCGNAME` trên node mới.
 - Kernel < 4.5 thiếu `UI_ABS_SETUP` → tự fallback API `uinput_user_dev` cũ.
 - Cảm ứng có thể dùng protocol MT-A (không có `ABS_MT_SLOT`) → engine dùng slot 0 duy nhất,
   vẫn an toàn nhưng không scale đa ngón chính xác như MT-B.

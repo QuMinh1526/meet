@@ -35,7 +35,7 @@ object NativeBridge {
         val base = when (code) {
             OK -> "OK"
             ERR_NO_TOUCH_DEVICE ->
-                "Không tìm thấy màn hình cảm ứng phù hợp (ABS_MT_POSITION_X/Y + INPUT_PROP_DIRECT)."
+                "Không tìm thấy màn hình cảm ứng phù hợp (EV_ABS + ABS_MT_POSITION_X/Y với max > min)."
             ERR_UINPUT_OPEN ->
                 "Không mở được /dev/uinput: Permission denied (SELinux chặn?) - xem log."
             ERR_UINPUT_SETUP ->
@@ -43,7 +43,7 @@ object NativeBridge {
             ERR_UINPUT_CREATE ->
                 "Không tạo được thiết bị ảo (UI_DEV_CREATE thất bại)."
             ERR_UINPUT_NODE_MISSING ->
-                "Thiết bị ảo không xuất hiện trong /proc/bus/input/devices - đã hủy, KHÔNG grab."
+                "Không xác minh được thiết bị ảo (sysfs/UI_GET_SYSNAME, /dev/input, EVIOCGNAME) - đã hủy, KHÔNG grab."
             ERR_GRAB ->
                 "Không grab được cảm ứng (EVIOCGRAB thất bại) - cảm ứng vẫn bình thường."
             ERR_BAD_ARG ->

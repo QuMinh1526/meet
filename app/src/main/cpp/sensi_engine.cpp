@@ -18,6 +18,7 @@
 
 #include <android/log.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -26,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <fcntl.h>
 #include <fstream>
 #include <linux/input.h>
@@ -36,6 +38,7 @@
 #include <sched.h>
 #include <signal.h>
 #include <string>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <thread>
@@ -259,56 +262,126 @@ struct TouchCandidate {
     std::string name;
     int fd = -1;
     int min_x = 0, max_x = 0, min_y = 0, max_y = 0;
-    int res_x = 0, res_y = 0;
+    int res_x = 0, res_y = 0;   // logged only; never used for filtering/ranking
     int max_slots = 10;
     bool has_slot_axis = true;
+    bool direct = false;        // INPUT_PROP_DIRECT: ranking preference only
     unsigned long long area = 0;
     std::vector<unsigned long> abs_bits;
     std::vector<unsigned long> key_bits;
     input_id id = {};
 };
 
+static const char *abs_code_name(int code);
+
+static const char *ev_code_name(int code) {
+    switch (code) {
+        case EV_SYN: return "EV_SYN";
+        case EV_KEY: return "EV_KEY";
+        case EV_REL: return "EV_REL";
+        case EV_ABS: return "EV_ABS";
+        case EV_MSC: return "EV_MSC";
+        case EV_SW: return "EV_SW";
+        case EV_LED: return "EV_LED";
+        case EV_SND: return "EV_SND";
+        case EV_REP: return "EV_REP";
+        case EV_FF: return "EV_FF";
+        case EV_PWR: return "EV_PWR";
+        case EV_FF_STATUS: return "EV_FF_STATUS";
+        default: return "EV_OTHER";
+    }
+}
+
+static std::string ev_bits_summary(const std::vector<unsigned long> &bits) {
+    std::string s;
+    for (int code = 0; code <= EV_MAX; ++code) {
+        if (!bit_test(bits, code)) continue;
+        if (!s.empty()) s += ",";
+        s += ev_code_name(code);
+    }
+    return s.empty() ? "none" : s;
+}
+
+/* Every abs axis this node exposes, with its reported min/max/res/fuzz/flat. */
+static std::string abs_bits_summary(int fd, const std::vector<unsigned long> &bits) {
+    std::string s;
+    for (int code = 0; code <= ABS_MAX; ++code) {
+        if (!bit_test(bits, code)) continue;
+        input_absinfo ai = {};
+        char part[160];
+        if (ioctl(fd, EVIOCGABS(code), &ai) == 0) {
+            snprintf(part, sizeof(part), "%s(%d) min=%d max=%d res=%d fuzz=%d flat=%d",
+                     abs_code_name(code), code, ai.minimum, ai.maximum,
+                     ai.resolution, ai.fuzz, ai.flat);
+        } else {
+            snprintf(part, sizeof(part), "%s(%d) EVIOCGABS failed: %s (errno=%d)",
+                     abs_code_name(code), code, strerror(errno), errno);
+        }
+        if (!s.empty()) s += "; ";
+        s += part;
+    }
+    return s.empty() ? "none" : s;
+}
+
 static bool read_candidate_info(int fd, const std::string &path, TouchCandidate *out) {
     char name[128] = {0};
     if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) < 0) {
-        LOGW("EVIOCGNAME failed for %s: %s", path.c_str(), strerror(errno));
+        LOGW("scan %s: EVIOCGNAME failed: %s (errno=%d) - using \"unknown\"",
+             path.c_str(), strerror(errno), errno);
         snprintf(name, sizeof(name), "unknown");
     }
 
     std::vector<unsigned long> ev_bits;
     if (!query_bits(fd, EVIOCGBIT(0, bitmap_words(EV_MAX)), EV_MAX, &ev_bits)) {
-        LOGW("EVIOCGBIT(EV) failed for %s: %s", path.c_str(), strerror(errno));
+        LOGI("scan %s \"%s\": EVIOCGBIT(EV) failed: %s (errno=%d) -> rejected",
+             path.c_str(), name, strerror(errno), errno);
         return false;
     }
-    if (!bit_test(ev_bits, EV_ABS)) return false;
+    LOGI("scan %s \"%s\": EV bits = [%s]", path.c_str(), name,
+         ev_bits_summary(ev_bits).c_str());
+    if (!bit_test(ev_bits, EV_ABS)) {
+        LOGI("scan %s \"%s\": no EV_ABS -> rejected", path.c_str(), name);
+        return false;
+    }
 
     std::vector<unsigned long> abs_bits;
     if (!query_bits(fd, EVIOCGBIT(EV_ABS, bitmap_words(ABS_MAX)), ABS_MAX, &abs_bits)) {
-        LOGW("EVIOCGBIT(ABS) failed for %s: %s", path.c_str(), strerror(errno));
+        LOGI("scan %s \"%s\": EVIOCGBIT(EV_ABS) failed: %s (errno=%d) -> rejected",
+             path.c_str(), name, strerror(errno), errno);
         return false;
     }
+    LOGI("scan %s \"%s\": ABS axes = [%s]", path.c_str(), name,
+         abs_bits_summary(fd, abs_bits).c_str());
+
     if (!bit_test(abs_bits, ABS_MT_POSITION_X) || !bit_test(abs_bits, ABS_MT_POSITION_Y)) {
+        LOGI("scan %s \"%s\": missing ABS_MT_POSITION_X and/or ABS_MT_POSITION_Y -> rejected",
+             path.c_str(), name);
         return false;
     }
 
     int props = 0;
     if (ioctl(fd, EVIOCGPROP(sizeof(props)), &props) < 0) {
-        LOGW("EVIOCGPROP failed for %s: %s", path.c_str(), strerror(errno));
+        LOGW("scan %s: EVIOCGPROP failed: %s (errno=%d) - treating DIRECT as unset",
+             path.c_str(), strerror(errno), errno);
         props = 0;
     }
     bool direct = (props & (1 << INPUT_PROP_DIRECT)) != 0;
+    LOGI("scan %s \"%s\": props=0x%x INPUT_PROP_DIRECT=%d", path.c_str(), name, props,
+         direct ? 1 : 0);
 
     input_absinfo ax = {}, ay = {}, aslot = {};
-    bool okx = ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &ax) == 0;
-    bool oky = ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &ay) == 0;
-    if (!okx || !oky) {
-        LOGW("EVIOCGABS position failed for %s: %s", path.c_str(), strerror(errno));
+    if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &ax) < 0) {
+        LOGI("scan %s \"%s\": EVIOCGABS(POSITION_X) failed: %s (errno=%d) -> rejected",
+             path.c_str(), name, strerror(errno), errno);
         return false;
     }
-
-    if (!direct) {
-        LOGI("candidate %s \"%s\": has ABS_MT_POSITION_X/Y (x=%d..%d, y=%d..%d) but "
-             "INPUT_PROP_DIRECT is missing -> rejected (not a touchscreen)",
+    if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &ay) < 0) {
+        LOGI("scan %s \"%s\": EVIOCGABS(POSITION_Y) failed: %s (errno=%d) -> rejected",
+             path.c_str(), name, strerror(errno), errno);
+        return false;
+    }
+    if (ax.maximum <= ax.minimum || ay.maximum <= ay.minimum) {
+        LOGI("scan %s \"%s\": degenerate POSITION range x=%d..%d y=%d..%d -> rejected",
              path.c_str(), name, ax.minimum, ax.maximum, ay.minimum, ay.maximum);
         return false;
     }
@@ -316,6 +389,7 @@ static bool read_candidate_info(int fd, const std::string &path, TouchCandidate 
     out->path = path;
     out->name = name;
     out->fd = fd;
+    out->direct = direct;
     out->min_x = ax.minimum;
     out->max_x = ax.maximum;
     out->min_y = ay.minimum;
@@ -335,7 +409,8 @@ static bool read_candidate_info(int fd, const std::string &path, TouchCandidate 
             }
             out->max_slots = slots;
         } else {
-            LOGW("EVIOCGABS(ABS_MT_SLOT) failed for %s: %s", path.c_str(), strerror(errno));
+            LOGW("EVIOCGABS(ABS_MT_SLOT) failed for %s: %s (errno=%d)",
+                 path.c_str(), strerror(errno), errno);
         }
     } else {
         out->has_slot_axis = false;
@@ -349,10 +424,10 @@ static bool read_candidate_info(int fd, const std::string &path, TouchCandidate 
     query_bits(fd, EVIOCGBIT(EV_ABS, bitmap_words(ABS_MAX)), ABS_MAX, &out->abs_bits);
     query_bits(fd, EVIOCGBIT(EV_KEY, bitmap_words(KEY_MAX)), KEY_MAX, &out->key_bits);
 
-    LOGI("candidate %s \"%s\": ABS_MT ok, direct=1, x=%d..%d (res %d), y=%d..%d (res %d), "
-         "slots=%d, area=%llu",
-         path.c_str(), name, out->min_x, out->max_x, out->res_x,
-         out->min_y, out->max_y, out->res_y, out->max_slots, out->area);
+    LOGI("scan %s \"%s\": ACCEPTED direct=%d x=%d..%d y=%d..%d slots=%d "
+         "area=%llu (res=%d/%d ignored)",
+         path.c_str(), name, direct ? 1 : 0, out->min_x, out->max_x,
+         out->min_y, out->max_y, out->max_slots, out->area, out->res_x, out->res_y);
     return true;
 }
 
@@ -370,8 +445,11 @@ static std::vector<TouchCandidate> scan_touch_devices(bool keep_fds, int *chosen
         snprintf(path, sizeof(path), "/dev/input/event%d", i);
         int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0) {
-            if (errno != ENOENT && errno != ENODEV) {
-                LOGD("open %s failed: %s", path, strerror(errno));
+            if (errno == EACCES || errno == EPERM) {
+                LOGW("scan: open %s failed: %s (errno=%d) - node inaccessible",
+                     path, strerror(errno), errno);
+            } else if (errno != ENOENT && errno != ENODEV) {
+                LOGD("scan: open %s failed: %s (errno=%d)", path, strerror(errno), errno);
             }
             continue;
         }
@@ -387,15 +465,23 @@ static std::vector<TouchCandidate> scan_touch_devices(bool keep_fds, int *chosen
     if (!found.empty()) {
         size_t best = 0;
         for (size_t i = 1; i < found.size(); ++i) {
-            if (found[i].area > found[best].area) best = i;
+            const TouchCandidate &a = found[i];
+            const TouchCandidate &b = found[best];
+            if (a.direct != b.direct) {
+                if (a.direct) best = i;
+            } else if (a.area > b.area) {
+                best = i;
+            }
         }
         if (chosen_index) *chosen_index = (int) best;
-        LOGI("selected %s \"%s\" (%zu candidate(s)) because it has the largest "
-             "resolution (area=%llu)",
+        LOGI("selected %s \"%s\" (%zu candidate(s)): %s (area=%llu)",
              found[best].path.c_str(), found[best].name.c_str(), found.size(),
+             found[best].direct ? "INPUT_PROP_DIRECT preferred"
+                                : "no DIRECT candidate, largest X*Y area",
              found[best].area);
     } else {
-        LOGW("no touchscreen candidate found in /dev/input/event0..31");
+        LOGW("no touchscreen candidate found in /dev/input/event0..31 "
+             "(need EV_ABS + ABS_MT_POSITION_X/Y with max > min)");
     }
 
     if (!keep_fds) {
@@ -411,27 +497,213 @@ static std::vector<TouchCandidate> scan_touch_devices(bool keep_fds, int *chosen
 // Virtual device creation + verification
 // ---------------------------------------------------------------------------
 
-static bool proc_has_input_device_named(const char *name) {
-    std::ifstream in("/proc/bus/input/devices");
-    if (!in.is_open()) return false;
-    std::string line;
-    std::string needle = "Name=\"";
-    needle += name;
-    needle += "\"";
-    while (std::getline(in, line)) {
-        if (line.find(needle) != std::string::npos) return true;
-    }
-    return false;
+struct VirtualVerify {
+    bool ok = false;
+    bool via_sysname = false;   // (a) UI_GET_SYSNAME -> sysfs path exists
+    bool via_new_node = false;  // (b) new /dev/input node + (c) EVIOCGNAME match
+    bool inotify_used = false;
+    bool sysname_queried = false;
+    std::string sysname;
+    std::string node;
+};
+
+/* Snapshot + inotify watch that MUST be taken before UI_DEV_CREATE. */
+struct InputWatch {
+    std::vector<std::string> before;
+    int ifd = -1;
+    bool inotify_ok = false;
+};
+
+static bool path_exists(const std::string &path) {
+    return access(path.c_str(), F_OK) == 0;
 }
 
-static bool wait_for_virtual_device(const char *name, int timeout_ms) {
+static std::vector<std::string> list_input_nodes(void) {
+    std::vector<std::string> nodes;
+    DIR *dir = opendir("/dev/input");
+    if (!dir) {
+        LOGW("verify: opendir(/dev/input) failed: %s (errno=%d)", strerror(errno), errno);
+        return nodes;
+    }
+    struct dirent *ent = nullptr;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (strncmp(ent->d_name, "event", 5) == 0) nodes.emplace_back(ent->d_name);
+    }
+    closedir(dir);
+    std::sort(nodes.begin(), nodes.end());
+    return nodes;
+}
+
+static bool node_name_matches(const std::string &path, const char *want,
+                              std::string *got_out) {
+    int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        LOGW("verify: open %s failed: %s (errno=%d)", path.c_str(), strerror(errno), errno);
+        return false;
+    }
+    char got[128] = {0};
+    bool ok = ioctl(fd, EVIOCGNAME(sizeof(got) - 1), got) >= 0;
+    int err = errno;
+    close(fd);
+    if (!ok) {
+        LOGW("verify: EVIOCGNAME(%s) failed: %s (errno=%d)", path.c_str(),
+             strerror(err), err);
+        return false;
+    }
+    if (got_out) *got_out = got;
+    return strcmp(got, want) == 0;
+}
+
+static InputWatch begin_input_watch(void) {
+    InputWatch w;
+    w.before = list_input_nodes();
+    LOGI("verify: /dev/input has %zu event node(s) before UI_DEV_CREATE", w.before.size());
+    for (const auto &n : w.before) LOGD("verify: pre-existing /dev/input/%s", n.c_str());
+
+    w.ifd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (w.ifd >= 0) {
+        if (inotify_add_watch(w.ifd, "/dev/input", IN_CREATE | IN_MOVED_TO) >= 0) {
+            w.inotify_ok = true;
+            LOGI("verify: inotify watch active on /dev/input");
+        } else {
+            LOGW("verify: inotify_add_watch(/dev/input) failed: %s (errno=%d)",
+                 strerror(errno), errno);
+            close(w.ifd);
+            w.ifd = -1;
+        }
+    } else {
+        LOGW("verify: inotify_init1 failed: %s (errno=%d) - using scan only",
+             strerror(errno), errno);
+    }
+    return w;
+}
+
+static void close_input_watch(InputWatch *w) {
+    if (w->ifd >= 0) close(w->ifd);
+    w->ifd = -1;
+}
+
+/*
+ * Verifies a freshly created uinput device WITHOUT reading
+ * /proc/bus/input/devices (unreadable from shell on some Android 12 devices).
+ * Tries three independent ways, logging each one:
+ *   (a) UI_GET_SYSNAME -> /sys/devices/virtual/input/<sysname> (or
+ *       /sys/class/input/<sysname>) exists,
+ *   (b) /dev/input snapshot taken BEFORE UI_DEV_CREATE, diffed afterwards
+ *       (plus inotify create events when available),
+ *   (c) open the new node and require EVIOCGNAME == virtual device name.
+ * One successful way is enough; otherwise the caller destroys the device and
+ * never grabs the real touchscreen.
+ */
+static void verify_virtual_device(int uifd, const char *name, int timeout_ms,
+                                  InputWatch *watch, VirtualVerify *result) {
+    VirtualVerify v;
+    const std::vector<std::string> &before = watch->before;
+    int ifd = watch->ifd;
+    v.inotify_used = watch->inotify_ok;
+
+    bool sysname_fail_logged = false;
+    bool sysfs_fail_logged = false;
+    char sysname[96] = {0};
     int waited = 0;
-    while (waited < timeout_ms) {
-        if (proc_has_input_device_named(name)) return true;
+
+    while (true) {
+        // (a) UI_GET_SYSNAME + sysfs existence.
+        if (!v.via_sysname) {
+            if (!v.sysname_queried) {
+                v.sysname_queried = true;
+                if (ioctl(uifd, UI_GET_SYSNAME(sizeof(sysname) - 1), sysname) < 0) {
+                    LOGW("verify: (a) UI_GET_SYSNAME failed: %s (errno=%d)",
+                         strerror(errno), errno);
+                } else {
+                    v.sysname = sysname;
+                    LOGI("verify: (a) UI_GET_SYSNAME -> \"%s\"", sysname);
+                }
+            }
+            if (!v.sysname.empty()) {
+                std::string p1 = "/sys/devices/virtual/input/" + v.sysname;
+                std::string p2 = "/sys/class/input/" + v.sysname;
+                if (path_exists(p1) || path_exists(p2)) {
+                    v.via_sysname = true;
+                    LOGI("verify: (a) OK - %s exists",
+                         path_exists(p1) ? p1.c_str() : p2.c_str());
+                } else if (!sysfs_fail_logged) {
+                    sysfs_fail_logged = true;
+                    LOGW("verify: (a) sysfs %s not present yet", p1.c_str());
+                }
+            } else if (!sysname_fail_logged) {
+                sysname_fail_logged = true;
+            }
+        }
+
+        // (b) inotify create events, then (c) EVIOCGNAME match.
+        if (ifd >= 0 && !v.via_new_node) {
+            char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+            ssize_t n;
+            while ((n = read(ifd, buf, sizeof(buf))) > 0) {
+                for (char *p = buf; p < buf + n;) {
+                    struct inotify_event *ev = reinterpret_cast<struct inotify_event *>(p);
+                    if (ev->len > 0 && (ev->mask & (IN_CREATE | IN_MOVED_TO))) {
+                        std::string entry(ev->name);
+                        if (entry.rfind("event", 0) == 0) {
+                            std::string node = "/dev/input/" + entry;
+                            std::string got;
+                            LOGI("verify: (b) inotify IN_CREATE %s", node.c_str());
+                            if (node_name_matches(node, name, &got)) {
+                                v.via_new_node = true;
+                                v.node = node;
+                                LOGI("verify: (b) OK via inotify - %s EVIOCGNAME=\"%s\"",
+                                     node.c_str(), got.c_str());
+                                break;
+                            }
+                            LOGW("verify: (c) %s EVIOCGNAME=\"%s\" != \"%s\"",
+                                 node.c_str(), got.c_str(), name);
+                        }
+                    }
+                    p += sizeof(struct inotify_event) + ev->len;
+                }
+                if (v.via_new_node) break;
+            }
+        }
+
+        // (b) plain before/after diff (works even when inotify is unavailable).
+        if (!v.via_new_node) {
+            std::vector<std::string> now = list_input_nodes();
+            for (const auto &entry : now) {
+                if (std::find(before.begin(), before.end(), entry) != before.end()) continue;
+                std::string node = "/dev/input/" + entry;
+                std::string got;
+                LOGI("verify: (b) new node %s appeared", node.c_str());
+                if (node_name_matches(node, name, &got)) {
+                    v.via_new_node = true;
+                    v.node = node;
+                    LOGI("verify: (b) OK via scan - %s EVIOCGNAME=\"%s\"",
+                         node.c_str(), got.c_str());
+                } else {
+                    LOGW("verify: (c) %s EVIOCGNAME=\"%s\" != \"%s\"",
+                         node.c_str(), got.c_str(), name);
+                }
+            }
+        }
+
+        if (v.via_sysname || v.via_new_node) break;
+        if (waited >= timeout_ms) break;
         usleep(50 * 1000);
         waited += 50;
     }
-    return false;
+
+    close_input_watch(watch);
+
+    v.ok = v.via_sysname || v.via_new_node;
+    if (!v.ok) {
+        LOGW("verify: FAILED after %dms - (a) %s, (b) inotify %s, (c) no node with "
+             "EVIOCGNAME \"%s\"",
+             timeout_ms,
+             v.sysname.empty() ? "UI_GET_SYSNAME unavailable"
+                               : "sysfs path not found",
+             v.inotify_used ? "watched" : "unavailable", name);
+    }
+    if (result) *result = v;
 }
 
 static const char *abs_code_name(int code) {
@@ -641,8 +913,12 @@ static int create_virtual_device(const TouchCandidate *src, const char *name,
         close(fd);
         return -1;
     }
+    // Snapshot /dev/input + start inotify BEFORE the device exists, so the new
+    // node can be detected by diffing afterwards.
+    InputWatch watch = begin_input_watch();
     if (ioctl(fd, UI_DEV_CREATE) < 0) {
         int e = errno;
+        close_input_watch(&watch);
         if (fail_code) *fail_code = SENSI_ERR_UINPUT_CREATE;
         set_error(SENSI_ERR_UINPUT_CREATE,
                   std::string("UI_DEV_CREATE failed: ") + strerror(e) +
@@ -651,17 +927,27 @@ static int create_virtual_device(const TouchCandidate *src, const char *name,
         return -1;
     }
 
-    LOGI("uinput device \"%s\" created, verifying node...", name);
-    if (!wait_for_virtual_device(name, 3000)) {
+    LOGI("uinput device \"%s\" created, verifying node (proc-independent)...", name);
+    VirtualVerify vr;
+    verify_virtual_device(fd, name, 1000, &watch, &vr);
+    if (!vr.ok) {
         if (fail_code) *fail_code = SENSI_ERR_UINPUT_NODE_MISSING;
         set_error(SENSI_ERR_UINPUT_NODE_MISSING,
                   std::string("virtual device \"") + name +
-                  "\" not found in /proc/bus/input/devices within 3s; refusing to grab");
+                  "\" could not be verified (UI_GET_SYSNAME sysfs, /dev/input diff and "
+                  "EVIOCGNAME all failed); refusing to grab");
         ioctl(fd, UI_DEV_DESTROY);
         close(fd);
         return -1;
     }
-    LOGI("virtual device \"%s\" verified in /proc/bus/input/devices", name);
+    std::string how;
+    if (vr.via_sysname) how = "UI_GET_SYSNAME sysfs path";
+    if (vr.via_new_node) {
+        if (!how.empty()) how += " + ";
+        how += "new /dev/input node with matching EVIOCGNAME";
+    }
+    LOGI("virtual device \"%s\" verified via %s (sysname=\"%s\", node=\"%s\")",
+         name, how.c_str(), vr.sysname.c_str(), vr.node.c_str());
     return fd;
 }
 
@@ -1243,7 +1529,8 @@ int sensi_start(void) {
     if (chosen < 0) {
         for (auto &c : candidates) if (c.fd >= 0) close(c.fd);
         set_error(SENSI_ERR_NO_TOUCH_DEVICE,
-                  "no touchscreen with ABS_MT_POSITION_X/Y and INPUT_PROP_DIRECT found");
+                  "no touchscreen with EV_ABS + ABS_MT_POSITION_X/Y (max>min) found "
+                  "in /dev/input/event0..31");
         g_state.store(STATE_ERROR);
         return SENSI_ERR_NO_TOUCH_DEVICE;
     }
