@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SensiTune</string>
+    <string name="app_subtitle">Nhân hệ số độ nhạy cảm ứng toàn màn hình — dùng Shizuku, không macro/aim</string>
+
+    <!-- Shizuku -->
+    <string name="shizuku_checking">Shizuku: đang kiểm tra…</string>
+    <string name="shizuku_not_installed">Shizuku: CHƯA CÀI ĐẶT</string>
+    <string name="shizuku_not_running">Shizuku: CHƯA CHẠY</string>
+    <string name="shizuku_no_permission">Shizuku: CHƯA CẤP QUYỀN</string>
+    <string name="shizuku_ready">Shizuku: OK (phiên bản %1$s)</string>
+    <string name="shizuku_not_ready">Shizuku chưa sẵn sàng. Hãy cài/mở Shizuku và cấp quyền cho app trước.</string>
+    <string name="shizuku_permission_requested">Đã gửi yêu cầu cấp quyền Shizuku — hãy xác nhận trong hộp thoại.</string>
+    <string name="reconnect">Kết nối lại Shizuku</string>
+    <string name="connecting">Đang kết nối Shizuku…</string>
+
+    <!-- Service -->
+    <string name="service_connected">UserService: đã kết nối (quyền shell, uid phải là 2000)</string>
+    <string name="service_not_connected">UserService: chưa kết nối</string>
+    <string name="service_unavailable">UserService: chưa khả dụng</string>
+    <string name="service_connect_failed">Không kết nối được SensiUserService qua Shizuku. Kiểm tra Shizuku đang chạy và đã cấp quyền, rồi bấm “Kết nối lại”.</string>
+
+    <!-- Enable -->
+    <string name="enable_switch">Bật SensiTune</string>
+    <string name="enable_failed_title">Không bật được</string>
+    <string name="engine_error_detail">Engine báo lỗi (mã %1$d): %2$s</string>
+    <string name="released_toast">Đã nhả cảm ứng về bình thường</string>
+    <string name="released_no_service">Service chưa kết nối. Nếu app đã chết, cảm ứng đã tự nhả.</string>
+    <string name="release_failed">Nhả cảm ứng thất bại — xem log hoặc giữ Vol+ và Vol- 2 giây</string>
+
+    <!-- Emergency -->
+    <string name="release_now">Nhả cảm ứng</string>
+    <string name="release_now_big">NHẢ CẢM ỨNG NGAY</string>
+    <string name="emergency_hint">Nếu cảm ứng bị “đơ”: bấm nút đỏ này, hoặc giữ đồng thời Vol+ và Vol- 2 giây (hoạt động cả khi app treo).</string>
+
+    <!-- Factors -->
+    <string name="factor_x_default">Hệ số X: 1.00</string>
+    <string name="factor_y_default">Hệ số Y: 1.00</string>
+    <string name="factor_x_value">Hệ số X: %1$.2f</string>
+    <string name="factor_y_value">Hệ số Y: %1$.2f</string>
+    <string name="factor_range_hint">Phạm vi 0.50 – 2.50, bước 0.05. 1.00 = giữ nguyên.</string>
+    <string name="lock_xy">Khóa X = Y</string>
+
+    <!-- Test -->
+    <string name="test_start">Thử 10 giây</string>
+    <string name="test_stop">Dừng thử</string>
+    <string name="test_running">Đang thử: còn %1$d giây…</string>
+    <string name="test_done">Thử xong — cảm ứng đã được nhả về bình thường.</string>
+    <string name="test_cancelled">Đã dừng thử (%1$s). Cảm ứng đã nhả.</string>
+    <string name="test_hint_first">Lần đầu dùng: hãy bấm “Thử 10 giây” để chắc chắn cảm ứng hoạt động đúng trước khi bật thật.</string>
+    <string name="will_release_on_leave">Lưu ý: rời app sẽ tự nhả cảm ứng. Bật “Chạy nền” nếu muốn giữ.</string>
+    <string name="test_turn_off_first">Hãy tắt engine trước khi chạy “Thử 10 giây”.</string>
+
+    <!-- Modes -->
+    <string name="only_apps_switch">Chỉ áp dụng trong app đã chọn</string>
+    <string name="background_switch">Chạy nền (foreground service + thông báo)</string>
+    <string name="usage_warning">Chưa cấp quyền Usage Access. Hãy cấp trong Cài đặt → Ứng dụng đặc biệt → Truy cập dữ liệu sử dụng, nếu không chế độ theo app sẽ không hoạt động.</string>
+    <string name="usage_permission_needed">Cần quyền Usage Access để biết app nào đang ở foreground</string>
+    <string name="usage_settings_failed">Không mở được trang cài đặt Usage Access. Hãy mở Cài đặt thủ công.</string>
+    <string name="pick_apps_first">Chưa chọn app mục tiêu nào — bấm “Chọn app” trước.</string>
+    <string name="foreground_current">App foreground hiện tại: %1$s</string>
+    <string name="foreground_none">không có</string>
+    <string name="foreground_off">Chế độ theo app: tắt</string>
+
+    <!-- Status -->
+    <string name="state_idle">Engine: IDLE (chưa grab)</string>
+    <string name="state_ready">Engine: READY (đã tạo thiết bị ảo, chưa grab)</string>
+    <string name="state_active">Engine: ACTIVE (đang grab)</string>
+    <string name="state_error">Engine: ERROR</string>
+    <string name="state_waiting_target">Đang chờ app mục tiêu…</string>
+    <string name="state_no_service">Engine: chưa có dữ liệu (service chưa kết nối)</string>
+    <string name="state_status_parse_error">Engine: không đọc được trạng thái</string>
+    <string name="state_error_detail">Engine: ERROR — %1$s</string>
+    <string name="engine_status_line">Engine: %1$s | %2$s | %3$d evt/s | trễ TB %4$d µs | max %5$d µs</string>
+    <string name="engine_status_detail">UID: %1$d | X=%2$.2f Y=%3$.2f | heartbeat cách %4$d ms | drop %5$d | EAGAIN %6$d\n%7$s</string>
+    <string name="rescue_hint">Cứu máy: giữ Vol+ &amp; Vol- 2 giây; bấm nút đỏ; tắt/bật màn hình; qua ADB: adb shell am force-stop com.example.sensitune; khởi động lại máy cũng nhả grab.</string>
+
+    <!-- Buttons -->
+    <string name="diagnose_button">Chẩn đoán</string>
+    <string name="logs_button">Nhật ký</string>
+    <string name="apps_button">Chọn app</string>
+    <string name="open_logs">Mở nhật ký</string>
+    <string name="copy_all">Copy</string>
+    <string name="share">Chia sẻ</string>
+    <string name="save_file">Lưu</string>
+    <string name="clear">Xóa</string>
+    <string name="copied">Đã copy</string>
+
+    <!-- Diagnostics -->
+    <string name="diagnose_title">Chẩn đoán (không grab)</string>
+    <string name="diagnose_running">Đang chẩn đoán…</string>
+
+    <!-- Debug screen -->
+    <string name="debug_title">Nhật ký &amp; trạng thái</string>
+    <string name="debug_status_title">— BẢNG TRẠNG THÁI —</string>
+    <string name="debug_shizuku">Shizuku: %1$s (phiên bản %2$s)</string>
+    <string name="debug_shizuku_ok">OK</string>
+    <string name="debug_service">Service: %1$s</string>
+    <string name="debug_uid">UID UserService: %1$d (phải là 2000)</string>
+    <string name="debug_engine_state">Trạng thái engine: %1$s</string>
+    <string name="debug_device">Thiết bị cảm ứng: %1$s</string>
+    <string name="debug_factor">Hệ số hiện tại: X=%1$.2f Y=%2$.2f</string>
+    <string name="debug_perf">Event/giây: %1$d | trễ TB %2$d µs | max %3$d µs</string>
+    <string name="debug_counters">Gói bị drop: %1$d | EAGAIN: %2$d</string>
+    <string name="debug_heartbeat">Heartbeat cách đây: %1$s</string>
+    <string name="debug_foreground">App foreground: %1$s</string>
+    <string name="debug_last_error">Lỗi cuối: %1$s</string>
+    <string name="filter_all">Tất cả</string>
+    <string name="filter_info">INFO+</string>
+    <string name="filter_warn">WARN+</string>
+    <string name="filter_error">ERROR</string>
+    <string name="log_cleared">Đã xóa log</string>
+    <string name="saved_to">Đã lưu: %1$s</string>
+    <string name="save_failed">Lưu thất bại: %1$s</string>
+
+    <!-- App picker -->
+    <string name="picker_title">Chọn app mục tiêu</string>
+    <string name="picker_hint">Tick các app muốn áp dụng. Mỗi app có thể có hệ số X/Y riêng; nếu để trống sẽ dùng hệ số chung.</string>
+    <string name="picker_search_hint">Tìm app…</string>
+    <string name="picker_save">Lưu</string>
+    <string name="picker_cancel">Hủy</string>
+    <string name="picker_saved">Đã lưu %1$d app mục tiêu</string>
+    <string name="picker_factor_button">Hệ số</string>
+    <string name="picker_use_global">Hệ số: dùng chung</string>
+    <string name="picker_factor_hint">Để trống cả hai ô để dùng hệ số chung. Giá trị hợp lệ 0.5 – 2.5.</string>
+    <string name="picker_factor_x">Hệ số X</string>
+    <string name="picker_factor_y">Hệ số Y</string>
+    <string name="picker_factor_x_hint">X (0.5 – 2.5)</string>
+    <string name="picker_factor_y_hint">Y (0.5 – 2.5)</string>
+    <string name="picker_clear_override">Bỏ hệ số riêng</string>
+    <string name="picker_override_cleared">Đã chuyển về hệ số chung</string>
+    <string name="picker_override_set">Đã đặt X=%1$.2f Y=%2$.2f</string>
+
+    <!-- Notification -->
+    <string name="notif_channel_name">SensiTune đang chạy</string>
+    <string name="notif_channel_desc">Thông báo bắt buộc khi engine chạy nền, có nút nhả cảm ứng</string>
+    <string name="notif_title">SensiTune</string>
+    <string name="notif_running_text">Đang áp dụng hệ số cảm ứng</string>
+    <string name="notif_waiting_app">Đang chờ app mục tiêu…</string>
+    <string name="notif_active_in">Đang áp dụng trong %1$s</string>
+    <string name="notif_usage_missing">Thiếu quyền Usage Access — chế độ theo app không chạy</string>
+    <string name="notif_shizuku_lost">Shizuku đã dừng — cảm ứng đã được nhả</string>
+    <string name="background_start_failed">Không khởi động được service nền. Hãy kiểm tra quyền thông báo.</string>
+
+    <!-- QS tile -->
+    <string name="tile_label">SensiTune</string>
+    <string name="tile_subtitle">Nhấn để nhả cảm ứng</string>
+    <string name="tile_released">Đã nhả</string>
+</resources>

@@ -1,0 +1,15 @@
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+# Signed release APK is intentionally published
+!release/*.apk
+# Local signing material must never be committed
+.signing/
+bot-profile/

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.SensiTune" parent="@android:style/Theme.Material.Light">
+        <item name="android:colorPrimary">#1565C0</item>
+        <item name="android:colorPrimaryDark">#0D47A1</item>
+        <item name="android:colorAccent">#1565C0</item>
+        <item name="android:statusBarColor">#0D47A1</item>
+        <item name="android:windowBackground">#FFFDFDFD</item>
+    </style>
+</resources>
