@@ -220,6 +220,12 @@
             android:layout_height="wrap_content"
             android:text="@string/hud_switch" />
 
+        <Switch
+            android:id="@+id/swClockHud"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/clock_hud_switch" />
+
         <TextView
             android:id="@+id/tvOverlayPermission"
             android:layout_width="match_parent"

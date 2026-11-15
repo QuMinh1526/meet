@@ -109,7 +109,7 @@ Yêu cầu: Android Studio mới (AGP 8.5+), JDK 17, Android SDK 34, NDK 26.1.10
 APK debug: `app/build/outputs/apk/debug/app-debug.apk`.
 
 APK release đã ký (zipalign + Signature Scheme v2/v3):
-**`release/SensiTune-1.0.2.apk`** — xem `release/README.md` để biết fingerprint và cách verify/install.
+**`release/SensiTune-1.0.3.apk`** — xem `release/README.md` để biết fingerprint và cách verify/install.
 
 ### Test host cho phần dò ABS và JSON log
 
@@ -168,7 +168,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
    nào được chọn, SELinux mode. Nếu `uinputOpenable=false` → máy không hỗ trợ, **dừng ở đây**.
 2. **Thử 10 giây** — grab đúng 10 giây rồi tự nhả. Kiểm tra cảm ứng vẫn đúng.
 3. Bật **Bật SensiTune** với hệ số 1.00 → phải giống hệt bình thường.
-4. Kéo thanh X/Y (bước 0.05, 0.50–2.50). Bật **Khóa X = Y** nếu muốn hai hệ số bằng nhau.
+4. Kéo thanh X/Y (bước 0.05, 0.50–10.00). Bật **Khóa X = Y** nếu muốn hai hệ số bằng nhau.
 5. Rời app: mặc định engine **tự nhả**. Muốn chạy tiếp khi ở app khác, bật **Chạy nền**
    (foreground service + notification có nút nhả).
 6. **Chỉ áp dụng trong app đã chọn**: cấp quyền *Usage Access*, chọn app, bật công tắc.
@@ -252,7 +252,13 @@ mà không cần làm gì.
   sẽ tắt luôn chế độ theo app cho tới khi người dùng bật lại bằng tay.
 - Ứng dụng không tự bật khi khởi động máy và không chạy nền nếu người dùng không chọn.
 - HUD/menu cần quyền **Hiển thị trên ứng dụng khác**; thiếu quyền thì chỉ ẩn overlay, engine vẫn nguyên.
-- FPS chỉ là **ước lượng** từ `dumpsys SurfaceFlinger`; không tìm thấy layer → hiện `--`, không báo lỗi.
+- FPS lấy từ `dumpsys SurfaceFlinger --list | grep <package>` rồi `--latency <layer>`: bỏ dòng
+  refresh period, lấy hiệu `ActualPresentTime` (cột 2, ns) giữa các dòng. Layer không còn → tự
+  `--list` lại; không tìm thấy layer → hiện `--`, không báo lỗi.
+- Toạ độ cảm ứng ảo được giữ cách mép màn hình ~1% mỗi trục khi hệ số khác 1.0, tránh vùng
+  gesture/bo góc của hệ thống nuốt mất điểm chạm làm cảm ứng “kẹt góc”. Bản chất touchscreen là
+  toạ độ tuyệt đối nên muốn xoay vô hạn vẫn phải nhấc tay vuốt lại; mỗi lần chạm mới lại lấy mốc
+  tại vị trí ngón và không giữ trạng thái kẹt của lần trước.
 - Nhiệt độ lấy từ `/sys/class/thermal` (đọc một lần, cache đường dẫn); zone trả giá trị vô lý
   (ví dụ `-40000`) bị bỏ qua. GPU % bị chặn trên nhiều ROM nên không có ô này.
 
@@ -262,12 +268,16 @@ Bật **Menu nổi** / **Hiện HUD** ở màn hình chính (cần quyền Hiể
 Cả hai overlay do `SensiService` (FGS) host, dùng View thường — không Compose/Fragment.
 
 - **Menu nổi**: nút tròn 48dp, kéo thả, tự dính mép và lưu vị trí. Chạm để mở bảng:
-  - tab **Độ nhạy**: hệ số X/Y bằng nút −/+ (bước 0.05, 0.50–2.50), công tắc Khóa X=Y,
+  - tab **Độ nhạy**: hệ số X/Y bằng nút −/+ (bước 0.05, 0.50–10.00), công tắc Khóa X=Y,
     nút đỏ **NHẢ**; không dùng slider vì ngón kéo cũng bị nhân hệ số;
-  - tab **HUD**: bật/tắt HUD, bật/tắt từng chỉ số + đổi thứ tự bằng ↑/↓, cỡ chữ, độ mờ,
-    kiểu hàng ngang/cột dọc, ngưỡng vàng/đỏ, khóa/mở khóa vị trí và 4 nút mũi tên 8px.
+  - tab **HUD**: bật/tắt HUD hiệu năng, bật/tắt **HUD ngày giờ riêng**, bật/tắt từng chỉ số +
+    đổi thứ tự bằng ↑/↓, **cỡ chữ dùng chung cho cả 2 HUD**, độ mờ, kiểu hàng ngang/cột dọc,
+    ngưỡng vàng/đỏ, khóa/mở khóa vị trí và 4 nút mũi tên 8px.
   Bảng tự đóng sau 5 giây không chạm.
-- **HUD**: mỗi chỉ số một ô (`FPS ~`, `CPU°C`, `GPU°C`, `Pin°C`, `RAM°C`, `Thân°C`, `Lưng°C`,
+- **HUD ngày giờ**: cửa sổ overlay riêng, định dạng `EEE MMM d HH:mm:ss` (ví dụ
+  `Fri Jun 7 12:59:59`), cập nhật mỗi giây, không chung với ô nhiệt độ/CPU/GPU. Cùng cơ chế
+  khóa/kéo/vị trí riêng và cùng cỡ chữ với HUD hiệu năng.
+- **HUD**: mỗi chỉ số một ô (`FPS`, `CPU°C`, `GPU°C`, `Pin°C`, `RAM°C`, `Thân°C`, `Lưng°C`,
   `CPU%`, xung CPU). Nhiệt độ > ngưỡng vàng/đỏ đổi màu. Mặc định **khóa**: cờ
   `FLAG_NOT_TOUCHABLE` nên chạm xuyên qua game, không cản. Mở khóa → viền sáng + 🔓, kéo được,
   tự khóa sau 15 giây; chạm giữ 1 giây trên HUD để khóa lại. Vị trí lưu riêng cho dọc/ngang.

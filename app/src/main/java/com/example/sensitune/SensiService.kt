@@ -41,6 +41,9 @@ class SensiService : Service(), ShizukuHelper.Listener {
     // failures here only hide a view, they never touch grab/heartbeat state.
     @Volatile
     private var hud: PerfHud? = null
+
+    @Volatile
+    private var clock: ClockHud? = null
     private var menu: FloatMenu? = null
     private var perfThread: HandlerThread? = null
 
@@ -297,7 +300,8 @@ class SensiService : Service(), ShizukuHelper.Listener {
     // Overlays (floating menu + HUD)
     // ------------------------------------------------------------------
 
-    private fun overlaysWanted(): Boolean = prefs.hudEnabled || prefs.floatMenuEnabled
+    private fun overlaysWanted(): Boolean =
+        prefs.hudEnabled || prefs.clockHudEnabled || prefs.floatMenuEnabled
 
     private val menuCallbacks = object : FloatMenu.Callbacks {
         override fun onSensitivityChanged() {
@@ -320,6 +324,7 @@ class SensiService : Service(), ShizukuHelper.Listener {
         override fun onHudLockChanged() {
             try {
                 hud?.setLocked(prefs.hudLocked)
+                clock?.setLocked(prefs.hudLocked)
             } catch (t: Throwable) {
                 LogBuffer.error(TAG, "hud lock change failed", t)
             }
@@ -371,6 +376,14 @@ class SensiService : Service(), ShizukuHelper.Listener {
                 hud?.hide()
                 hud = null
             }
+
+            if (prefs.clockHudEnabled) {
+                if (clock == null) clock = ClockHud(applicationContext, prefs)
+                clock?.show()
+            } else {
+                clock?.hide()
+                clock = null
+            }
         } catch (t: Throwable) {
             LogBuffer.error(TAG, "syncOverlays failed", t)
         }
@@ -384,6 +397,12 @@ class SensiService : Service(), ShizukuHelper.Listener {
             LogBuffer.error(TAG, "hud hide failed", t)
         }
         hud = null
+        try {
+            clock?.hide()
+        } catch (t: Throwable) {
+            LogBuffer.error(TAG, "clock hide failed", t)
+        }
+        clock = null
         try {
             menu?.hide()
         } catch (t: Throwable) {
@@ -507,6 +526,7 @@ class SensiService : Service(), ShizukuHelper.Listener {
         super.onConfigurationChanged(newConfig)
         try {
             hud?.onConfigurationChanged()
+            clock?.onConfigurationChanged()
             menu?.onConfigurationChanged()
         } catch (t: Throwable) {
             LogBuffer.error(TAG, "overlay rotation handling failed", t)

@@ -249,6 +249,16 @@ class PerfSampler {
     // FPS (SurfaceFlinger)
     // ------------------------------------------------------------------
 
+    /**
+     * Real FPS from SurfaceFlinger.
+     *
+     * Layer discovery mirrors the adb recipe:
+     *   dumpsys SurfaceFlinger --list | grep "<pkg>"
+     * and then the latency buffer gives a refresh period on line 1 plus up to
+     * 127 rows of (desiredPresentTime, actualPresentTime, frameReadyTime) in
+     * nanoseconds. FPS is derived from the differences between consecutive
+     * actualPresentTime values, not from "how many frames look recent".
+     */
     private fun fps(): Double? {
         val nowMs = SystemClock.elapsedRealtime()
         var pkg = configuredPkg.trim().ifEmpty { null }
@@ -269,20 +279,8 @@ class PerfSampler {
 
         var layer = layerName?.takeIf { layerPkg == pkg }
         if (layer == null) {
-            val list = dumpsys("SurfaceFlinger", "--list")
-            if (list == null) {
-                fpsNote = "--list timeout"
-                return null
-            }
-            val candidates = list.lineSequence()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() && it.contains(pkg) }
-                .toList()
-            layer = candidates.firstOrNull { !it.startsWith("Background for") }
-                ?: candidates.firstOrNull()
+            layer = findLayer(pkg)
             if (layer == null) {
-                layerPkg = pkg
-                layerName = null
                 fpsNote = "không thấy layer của $pkg"
                 logOnce("layer:$pkg", "fps: no SurfaceFlinger layer contains '$pkg'")
                 return null
@@ -292,29 +290,89 @@ class PerfSampler {
             LogBuffer.info(TAG, "fps: using layer \"$layer\" for $pkg")
         }
 
-        val out = dumpsys("SurfaceFlinger", "--latency", layer)
+        val out = shell("dumpsys SurfaceFlinger --latency ${shellQuote(layer)}")
         if (out == null) {
             fpsNote = "--latency timeout"
             return null
         }
-        val nowNs = System.nanoTime()
-        var valid = 0
-        var counted = 0
-        for (line in out.lineSequence()) {
-            val parts = line.trim().split(Regex("\\s+"))
+        val parsed = parseLatency(out)
+        if (parsed == null) {
+            // The layer can disappear when the game restarts: drop the cache so
+            // the next tick re-runs --list instead of staying broken forever.
+            layerPkg = pkg
+            layerName = null
+            fpsNote = "không đủ timestamp present"
+            logOnce("latency:$pkg", "fps: --latency of \"$layer\" had <2 usable frames")
+            return null
+        }
+        return parsed.first
+    }
+
+    /** `dumpsys SurfaceFlinger --list | grep -F <pkg>`, with an in-process fallback. */
+    private fun findLayer(pkg: String): String? {
+        val safe = pkg.takeIf { PACKAGE_RE.matches(it) }
+        var candidates: List<String> = emptyList()
+        if (safe != null) {
+            val grep = shell("dumpsys SurfaceFlinger --list | grep -F ${shellQuote(safe)}")
+            if (!grep.isNullOrBlank()) {
+                candidates = grep.lineSequence().map { it.trim() }
+                    .filter { it.isNotEmpty() }.toList()
+            }
+        }
+        if (candidates.isEmpty()) {
+            val list = dumpsys("SurfaceFlinger", "--list")
+            if (list == null) {
+                fpsNote = "--list timeout"
+                return null
+            }
+            candidates = list.lineSequence().map { it.trim() }
+                .filter { it.isNotEmpty() && it.contains(pkg) }.toList()
+        }
+        return candidates.firstOrNull { it.contains("SurfaceView") && !it.startsWith("Background for") }
+            ?: candidates.firstOrNull { !it.startsWith("Background for") }
+            ?: candidates.firstOrNull()
+    }
+
+    /**
+     * Parses the `--latency` buffer. Returns (fps, refreshPeriodNs) or null when
+     * fewer than two usable present timestamps exist. Rows whose actual time is
+     * 0 or INT64_MAX are placeholders and are skipped, as are non-monotonic and
+     * >500 ms gaps (app paused / buffer stale) so they cannot drag FPS down.
+     */
+    private fun parseLatency(out: String): Pair<Double, Long>? {
+        val lines = out.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+        if (lines.size < 3) return null
+        val refreshNs = lines.firstOrNull()?.toLongOrNull() ?: 0L
+
+        val present = ArrayList<Long>(LATENCY_ROWS)
+        for (line in lines.drop(1)) {
+            val parts = line.split(SPLIT_WS)
             if (parts.size < 3) continue
             val actual = parts[1].toLongOrNull() ?: continue
             if (actual <= 0 || actual >= Long.MAX_VALUE / 2) continue
-            valid++
-            val age = nowNs - actual
-            if (age in 0..1_000_000_000L) counted++
+            if (present.isNotEmpty() && actual <= present.last()) continue
+            present.add(actual)
         }
-        if (valid == 0) {
-            fpsNote = "không có timestamp present"
-            return null
+        if (present.size < 3) return null
+
+        var sum = 0L
+        var gaps = 0
+        for (i in 1 until present.size) {
+            val d = present[i] - present[i - 1]
+            if (d in 1..MAX_FRAME_GAP_NS) {
+                sum += d
+                gaps++
+            }
         }
-        return counted.toDouble()
+        if (gaps == 0) return null
+        val avg = sum.toDouble() / gaps
+        if (avg <= 0.0) return null
+        val fps = 1_000_000_000.0 / avg
+        if (!fps.isFinite() || fps <= 0.0 || fps > 1000.0) return null
+        return Pair(fps, refreshNs)
     }
+
+    private fun shellQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 
     private fun detectForegroundPkg(): String? {
         val text = dumpsys("activity", "activities") ?: return null
@@ -334,16 +392,23 @@ class PerfSampler {
     // Helpers
     // ------------------------------------------------------------------
 
+    private fun dumpsys(vararg args: String): String? =
+        runCommand(listOf("dumpsys") + args, "dumpsys ${args.joinToString(" ")}")
+
+    /** Runs a pipeline through /system/bin/sh in the shell (uid 2000) process. */
+    private fun shell(command: String): String? =
+        runCommand(listOf("/system/bin/sh", "-c", command), "sh -c $command")
+
     /**
-     * Runs a command with an 800 ms budget, reading concurrently so a full pipe
-     * can never block the child. Never runs two commands at once.
+     * Runs a command with a 1.5 s budget, reading concurrently so a full pipe can
+     * never block the child. Never runs two commands at once.
      */
-    private fun dumpsys(vararg args: String): String? {
+    private fun runCommand(cmd: List<String>, label: String): String? {
         val start = SystemClock.elapsedRealtime()
         synchronized(execLock) {
             var process: Process? = null
             try {
-                val p = ProcessBuilder(listOf("dumpsys") + args)
+                val p = ProcessBuilder(cmd)
                     .redirectErrorStream(true)
                     .start()
                 process = p
@@ -361,24 +426,19 @@ class PerfSampler {
                 val finished = p.waitFor(CMD_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 if (!finished) {
                     p.destroyForcibly()
-                    logOnce("timeout:${args.joinToString(" ")}",
-                        "dumpsys ${args.joinToString(" ")} timed out after ${CMD_TIMEOUT_MS}ms")
+                    logOnce("timeout:$label", "$label timed out after ${CMD_TIMEOUT_MS}ms")
                     return null
                 }
                 reader.join(200)
                 if (p.exitValue() != 0) {
-                    logOnce("exit:${args.joinToString(" ")}",
-                        "dumpsys ${args.joinToString(" ")} exited ${p.exitValue()}")
+                    logOnce("exit:$label", "$label exited ${p.exitValue()}")
                     return null
                 }
                 val ms = SystemClock.elapsedRealtime() - start
-                if (ms > 500) {
-                    LogBuffer.warn(TAG, "dumpsys ${args.joinToString(" ")} took ${ms}ms")
-                }
+                if (ms > 500) LogBuffer.warn(TAG, "$label took ${ms}ms")
                 return sb.toString()
             } catch (t: Throwable) {
-                logOnce("exec:${args.joinToString(" ")}",
-                    "dumpsys ${args.joinToString(" ")} failed: ${t.javaClass.simpleName}: ${t.message}")
+                logOnce("exec:$label", "$label failed: ${t.javaClass.simpleName}: ${t.message}")
                 try {
                     process?.destroyForcibly()
                 } catch (_: Throwable) {
@@ -399,8 +459,13 @@ class PerfSampler {
 
     private companion object {
         const val TAG = "PerfSampler"
-        const val CMD_TIMEOUT_MS = 800L
+        const val CMD_TIMEOUT_MS = 1500L
         const val FG_CACHE_MS = 5000L
+        const val LATENCY_ROWS = 128
+        const val MAX_FRAME_GAP_NS = 500_000_000L
+
+        val SPLIT_WS = Regex("\\s+")
+        val PACKAGE_RE = Regex("[A-Za-z0-9_.]+")
 
         val CPU_ZONE_1 = Regex("^cpu-\\d-\\d-usr$")
         val CPU_ZONE_2 = Regex("^cpuss-\\d-usr$")

@@ -163,8 +163,8 @@ class AppPickerActivity : Activity() {
                     row.override = null
                     toast(getString(R.string.picker_override_cleared))
                 } else {
-                    val cx = x.coerceIn(0.5f, 2.5f)
-                    val cy = y.coerceIn(0.5f, 2.5f)
+                    val cx = x.coerceIn(0.5f, 10f)
+                    val cy = y.coerceIn(0.5f, 10f)
                     row.override = Pair(cx, cy)
                     toast(getString(R.string.picker_override_set, cx, cy))
                 }

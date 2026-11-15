@@ -53,6 +53,7 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
     private lateinit var tvUsageWarning: TextView
     private lateinit var swFloatMenu: Switch
     private lateinit var swHud: Switch
+    private lateinit var swClockHud: Switch
     private lateinit var tvOverlayPermission: TextView
 
     private var suppressSwitchCallbacks = false
@@ -108,6 +109,7 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
         tvUsageWarning = findViewById(R.id.tvUsageWarning)
         swFloatMenu = findViewById(R.id.swFloatMenu)
         swHud = findViewById(R.id.swHud)
+        swClockHud = findViewById(R.id.swClockHud)
         tvOverlayPermission = findViewById(R.id.tvOverlayPermission)
     }
 
@@ -119,6 +121,7 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
         suppressSwitchCallbacks = true
         swFloatMenu.isChecked = prefs.floatMenuEnabled
         swHud.isChecked = prefs.hudEnabled
+        swClockHud.isChecked = prefs.clockHudEnabled
         suppressSwitchCallbacks = false
 
         swFloatMenu.setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
@@ -127,11 +130,21 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
         swHud.setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
             if (!suppressSwitchCallbacks) setOverlayPref(menu = false, on = checked)
         }
+        swClockHud.setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
+            if (!suppressSwitchCallbacks) setOverlayPref(menu = false, on = checked, clock = true)
+        }
     }
 
-    private fun setOverlayPref(menu: Boolean, on: Boolean) {
-        if (menu) prefs.floatMenuEnabled = on else prefs.hudEnabled = on
-        LogBuffer.info("MainActivity", "${if (menu) "floatMenu" else "hud"} -> $on")
+    private fun setOverlayPref(menu: Boolean, on: Boolean, clock: Boolean = false) {
+        when {
+            clock -> prefs.clockHudEnabled = on
+            menu -> prefs.floatMenuEnabled = on
+            else -> prefs.hudEnabled = on
+        }
+        LogBuffer.info(
+            "MainActivity",
+            "${when { clock -> "clockHud"; menu -> "floatMenu"; else -> "hud" }} -> $on"
+        )
         if (on && !OverlayUi.canDraw(this)) {
             toast(getString(R.string.overlay_permission_needed))
             openOverlaySettings()
@@ -156,6 +169,7 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
         suppressSwitchCallbacks = true
         swFloatMenu.isChecked = prefs.floatMenuEnabled
         swHud.isChecked = prefs.hudEnabled
+        swClockHud.isChecked = prefs.clockHudEnabled
         suppressSwitchCallbacks = false
         val granted = OverlayUi.canDraw(this)
         tvOverlayPermission.text = if (granted) {
@@ -173,8 +187,8 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
     // ------------------------------------------------------------------
 
     private fun setupFactorSliders() {
-        sbX.max = 40
-        sbY.max = 40
+        sbX.max = FACTOR_MAX_STEPS
+        sbY.max = FACTOR_MAX_STEPS
         suppressSeekCallbacks = true
         sbX.progress = progressFromFactor(prefs.factorX)
         sbY.progress = progressFromFactor(prefs.factorY)
@@ -221,6 +235,10 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
         })
     }
 
+    private companion object {
+        const val FACTOR_MAX_STEPS = 190 // 0.50 .. 10.00, step 0.05
+    }
+
     private fun applyFactorLive(x: Float, y: Float) {
         if (ShizukuHelper.service == null) return
         if (prefs.enabled || testing) {
@@ -239,7 +257,7 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
     }
 
     private fun progressFromFactor(f: Float): Int {
-        return (((f - 0.5f) / 0.05f).roundToInt()).coerceIn(0, 40)
+        return (((f - 0.5f) / 0.05f).roundToInt()).coerceIn(0, FACTOR_MAX_STEPS)
     }
 
     // ------------------------------------------------------------------

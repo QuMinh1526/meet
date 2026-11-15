@@ -376,7 +376,7 @@ class FloatMenu(
         )
 
         box.addView(
-            label("Bước 0.05 · phạm vi 0.50 – 2.50 · 1.00 = giữ nguyên", 10f, Color.LTGRAY)
+            label("Bước 0.05 · phạm vi 0.50 – 10.00 · 1.00 = giữ nguyên", 10f, Color.LTGRAY)
         )
 
         box.addView(
@@ -409,6 +409,22 @@ class FloatMenu(
                     resetAutoClose()
                 }
             }
+        )
+
+        box.addView(
+            Switch(ctx).apply {
+                text = "Hiện HUD ngày giờ (Fri Jun 7 12:59:59)"
+                textSize = 13f
+                setTextColor(Color.WHITE)
+                isChecked = prefs.clockHudEnabled
+                setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
+                    prefs.clockHudEnabled = checked
+                    LogBuffer.info(TAG, "clockHudEnabled -> $checked")
+                    cb.onHudPrefsChanged()
+                    resetAutoClose()
+                }
+            },
+            topMargin()
         )
 
         box.addView(
@@ -455,7 +471,7 @@ class FloatMenu(
         )
         box.addView(orientationRow)
 
-        box.addView(stepperRow("Cỡ chữ", "%.2f".format(prefs.hudTextScale)) {
+        box.addView(stepperRow("Cỡ chữ (cả 2 HUD)", "%.2f".format(prefs.hudTextScale)) {
             prefs.hudTextScale = (prefs.hudTextScale + it).coerceIn(0.7f, 1.8f)
             cb.onHudPrefsChanged()
             buildContent()
@@ -513,7 +529,11 @@ class FloatMenu(
         }
 
         box.addView(
-            label("FPS là giá trị ước lượng từ SurfaceFlinger, không phải số đo chính thức.", 9f, Color.LTGRAY)
+            label(
+                "FPS đọc từ SurfaceFlinger (dumpsys --latency, hiệu ActualPresentTime của layer app đang chạy). " +
+                    "HUD ngày giờ là cửa sổ riêng, không chung với nhiệt độ/CPU/GPU.",
+                9f, Color.LTGRAY
+            )
         )
     }
 
@@ -575,7 +595,7 @@ class FloatMenu(
     }
 
     private fun quantize(v: Float): Float =
-        ((v * 20f).roundToInt() / 20f).coerceIn(0.5f, 2.5f)
+        ((v * 20f).roundToInt() / 20f).coerceIn(0.5f, 10f)
 
     // ------------------------------------------------------------------
     // Small view helpers

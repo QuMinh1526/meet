@@ -1127,6 +1127,21 @@ static SlotState g_slots[MAX_SLOTS];
 static int g_current_slot = 0;
 static bool g_btn_touch_down = false;
 
+// Keep injected touches out of the outermost ~1% of each axis. Touches exactly
+// on the display edge can land in a system gesture zone / rounded-corner inset,
+// where the app never sees them: the cursor then appears stuck in that corner
+// until the finger moves back inside. This is a hard safety margin, not a
+// scaling change: with factor 1.0 the shift is only a few pixels.
+static int g_edge_x = 0;
+static int g_edge_y = 0;
+
+static int edge_margin(int lo, int hi) {
+    int range = hi - lo;
+    if (range <= 0) return 0;
+    int m = range / 100;
+    return m < 1 ? 1 : m;
+}
+
 static inline int clamp_int(int v, int lo, int hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
@@ -1274,13 +1289,17 @@ static void handle_abs_event(struct input_event *ev) {
             int raw = ev->value;
             if (!s.active) return; // no active finger: forward unchanged
             if (s.pending_init_x) {
-                s.virt_x = (float) clamp_int(raw, g_abs_min_x, g_abs_max_x);
+                int mx = (g_kx.load(std::memory_order_relaxed) != 1.0f) ? g_edge_x : 0;
+                s.virt_x = (float) clamp_int(raw, g_abs_min_x + mx,
+                                          g_abs_max_x - mx);
                 s.pending_init_x = false;
             } else {
                 float k = g_kx.load(std::memory_order_relaxed);
+                int mx = (k != 1.0f) ? g_edge_x : 0;
                 s.virt_x += (float) (raw - s.last_raw_x) * k;
-                s.virt_x = std::fmaxf((float) g_abs_min_x,
-                                      std::fminf((float) g_abs_max_x, s.virt_x));
+                s.virt_x = std::fmaxf((float) (g_abs_min_x + mx),
+                                      std::fminf((float) (g_abs_max_x - mx),
+                                                 s.virt_x));
             }
             s.last_raw_x = raw;
             ev->value = (int) lroundf(s.virt_x);
@@ -1292,13 +1311,17 @@ static void handle_abs_event(struct input_event *ev) {
             int raw = ev->value;
             if (!s.active) return;
             if (s.pending_init_y) {
-                s.virt_y = (float) clamp_int(raw, g_abs_min_y, g_abs_max_y);
+                int my = (g_ky.load(std::memory_order_relaxed) != 1.0f) ? g_edge_y : 0;
+                s.virt_y = (float) clamp_int(raw, g_abs_min_y + my,
+                                          g_abs_max_y - my);
                 s.pending_init_y = false;
             } else {
                 float k = g_ky.load(std::memory_order_relaxed);
+                int my = (k != 1.0f) ? g_edge_y : 0;
                 s.virt_y += (float) (raw - s.last_raw_y) * k;
-                s.virt_y = std::fmaxf((float) g_abs_min_y,
-                                      std::fminf((float) g_abs_max_y, s.virt_y));
+                s.virt_y = std::fmaxf((float) (g_abs_min_y + my),
+                                      std::fminf((float) (g_abs_max_y - my),
+                                                 s.virt_y));
             }
             s.last_raw_y = raw;
             ev->value = (int) lroundf(s.virt_y);
@@ -1587,6 +1610,11 @@ int sensi_start(void) {
     g_abs_max_x = src.max_x;
     g_abs_min_y = src.min_y;
     g_abs_max_y = src.max_y;
+    g_edge_x = edge_margin(g_abs_min_x, g_abs_max_x);
+    g_edge_y = edge_margin(g_abs_min_y, g_abs_max_y);
+    LOGI("virtual touch edge margin: x=%d y=%d raw units (keeps touches out of system "
+         "gesture/corner inset so swipes cannot stick in a screen corner)",
+         g_edge_x, g_edge_y);
     g_max_slots.store(src.max_slots);
     g_has_slot_axis.store(src.has_slot_axis);
     snprintf(g_device_path, sizeof(g_device_path), "%s", src.path.c_str());
@@ -1695,9 +1723,9 @@ int sensi_set_enabled(int enabled) {
 }
 
 int sensi_set_factor(float x, float y) {
-    if (!std::isfinite(x) || !std::isfinite(y) || x < 0.5f || x > 2.5f ||
-        y < 0.5f || y > 2.5f) {
-        LOGE("set_factor rejected: X=%.3f Y=%.3f (valid 0.5..2.5)", x, y);
+    if (!std::isfinite(x) || !std::isfinite(y) || x < 0.5f || x > 10.0f ||
+        y < 0.5f || y > 10.0f) {
+        LOGE("set_factor rejected: X=%.3f Y=%.3f (valid 0.5..10.0)", x, y);
         return SENSI_ERR_BAD_ARG;
     }
     g_kx.store(x);

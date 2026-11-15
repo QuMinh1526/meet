@@ -47,7 +47,7 @@ object NativeBridge {
             ERR_GRAB ->
                 "Không grab được cảm ứng (EVIOCGRAB thất bại) - cảm ứng vẫn bình thường."
             ERR_BAD_ARG ->
-                "Tham số không hợp lệ (hệ số phải trong khoảng 0.5 - 2.5)."
+                "Tham số không hợp lệ (hệ số phải trong khoảng 0.5 - 10.0)."
             ERR_NOT_READY ->
                 "Engine native chưa sẵn sàng (thư viện chưa load?)."
             ERR_INTERNAL ->

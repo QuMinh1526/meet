@@ -38,7 +38,7 @@
     <string name="factor_y_default">Hệ số Y: 1.00</string>
     <string name="factor_x_value">Hệ số X: %1$.2f</string>
     <string name="factor_y_value">Hệ số Y: %1$.2f</string>
-    <string name="factor_range_hint">Phạm vi 0.50 – 2.50, bước 0.05. 1.00 = giữ nguyên.</string>
+    <string name="factor_range_hint">Phạm vi 0.50 – 10.00, bước 0.05. 1.00 = giữ nguyên.</string>
     <string name="lock_xy">Khóa X = Y</string>
 
     <!-- Test -->
@@ -122,11 +122,11 @@
     <string name="picker_saved">Đã lưu %1$d app mục tiêu</string>
     <string name="picker_factor_button">Hệ số</string>
     <string name="picker_use_global">Hệ số: dùng chung</string>
-    <string name="picker_factor_hint">Để trống cả hai ô để dùng hệ số chung. Giá trị hợp lệ 0.5 – 2.5.</string>
+    <string name="picker_factor_hint">Để trống cả hai ô để dùng hệ số chung. Giá trị hợp lệ 0.5 – 10.0.</string>
     <string name="picker_factor_x">Hệ số X</string>
     <string name="picker_factor_y">Hệ số Y</string>
-    <string name="picker_factor_x_hint">X (0.5 – 2.5)</string>
-    <string name="picker_factor_y_hint">Y (0.5 – 2.5)</string>
+    <string name="picker_factor_x_hint">X (0.5 – 10.0)</string>
+    <string name="picker_factor_y_hint">Y (0.5 – 10.0)</string>
     <string name="picker_clear_override">Bỏ hệ số riêng</string>
     <string name="picker_override_cleared">Đã chuyển về hệ số chung</string>
     <string name="picker_override_set">Đã đặt X=%1$.2f Y=%2$.2f</string>
@@ -145,13 +145,14 @@
     <!-- Overlays: floating menu + performance HUD -->
     <string name="overlay_section">Menu nổi &amp; HUD hiệu năng</string>
     <string name="float_menu_switch">Menu nổi (nút tròn kéo thả, 2 tab Độ nhạy/HUD)</string>
-    <string name="hud_switch">Hiện HUD hiệu năng (nhiệt độ, FPS ước lượng, CPU)</string>
+    <string name="hud_switch">Hiện HUD hiệu năng (nhiệt độ, FPS, CPU)</string>
+    <string name="clock_hud_switch">Hiện HUD ngày giờ riêng (Fri Jun 7 12:59:59)</string>
     <string name="overlay_permission_ok">Quyền hiển thị trên ứng dụng khác: đã cấp.</string>
     <string name="overlay_permission_missing">Chưa có quyền “Hiển thị trên ứng dụng khác” — HUD/menu sẽ không hiện. Bật một công tắc ở trên để mở trang cấp quyền.</string>
     <string name="overlay_permission_needed">Cần quyền “Hiển thị trên ứng dụng khác” để vẽ HUD/menu nổi</string>
     <string name="overlay_settings_failed">Không mở được trang cấp quyền. Hãy vào Cài đặt → Ứng dụng → SensiTune → Hiển thị trên ứng dụng khác.</string>
     <string name="overlay_permission_missing_short">Thiếu quyền hiển thị trên ứng dụng khác — HUD/menu đang ẩn</string>
-    <string name="hud_note">HUD: mặc định khóa (chạm xuyên qua, không cản game). Mở khóa trong menu để kéo; tự khóa sau 15 giây. FPS là giá trị ước lượng từ SurfaceFlinger. Nhiệt độ &gt; 45°C vàng, &gt; 50°C đỏ. Overlay không ảnh hưởng engine/heartbeat.</string>
+    <string name="hud_note">HUD: mặc định khóa (chạm xuyên qua, không cản game). Mở khóa trong menu để kéo; tự khóa sau 15 giây. FPS lấy từ SurfaceFlinger bằng hiệu ActualPresentTime của layer app đang chạy; HUD ngày giờ (Fri Jun 7 12:59:59) là cửa sổ riêng, dùng chung cỡ chữ với HUD hiệu năng. Nhiệt độ &gt; 45°C vàng, &gt; 50°C đỏ. Overlay không ảnh hưởng engine/heartbeat.</string>
     <string name="notif_released">Đã nhả cảm ứng</string>
 
     <!-- QS tile -->

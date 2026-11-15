@@ -55,6 +55,24 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_HUD_ENABLED, false)
         set(value) = sp.edit().putBoolean(KEY_HUD_ENABLED, value).apply()
 
+    /** Separate date/time HUD ("Fri Jun 7 12:59:59"), independent of the perf HUD. */
+    var clockHudEnabled: Boolean
+        get() = sp.getBoolean(KEY_CLOCK_HUD_ENABLED, false)
+        set(value) = sp.edit().putBoolean(KEY_CLOCK_HUD_ENABLED, value).apply()
+
+    fun clockX(landscape: Boolean): Int =
+        sp.getInt(if (landscape) KEY_CLOCK_X_LAND else KEY_CLOCK_X_PORT, -1)
+
+    fun clockY(landscape: Boolean): Int =
+        sp.getInt(if (landscape) KEY_CLOCK_Y_LAND else KEY_CLOCK_Y_PORT, -1)
+
+    fun setClockPos(x: Int, y: Int, landscape: Boolean) {
+        sp.edit()
+            .putInt(if (landscape) KEY_CLOCK_X_LAND else KEY_CLOCK_X_PORT, x)
+            .putInt(if (landscape) KEY_CLOCK_Y_LAND else KEY_CLOCK_Y_PORT, y)
+            .apply()
+    }
+
     /** Locked by default: the HUD is not touchable and cannot be dragged by accident. */
     var hudLocked: Boolean
         get() = sp.getBoolean(KEY_HUD_LOCKED, true)
@@ -211,6 +229,11 @@ class Prefs(context: Context) {
         const val KEY_OVERRIDES = "per_app_overrides"
         const val KEY_FLOAT_MENU = "float_menu_enabled"
         const val KEY_HUD_ENABLED = "hud_enabled"
+        const val KEY_CLOCK_HUD_ENABLED = "clock_hud_enabled"
+        const val KEY_CLOCK_X_PORT = "clock_x_portrait"
+        const val KEY_CLOCK_Y_PORT = "clock_y_portrait"
+        const val KEY_CLOCK_X_LAND = "clock_x_landscape"
+        const val KEY_CLOCK_Y_LAND = "clock_y_landscape"
         const val KEY_HUD_LOCKED = "hud_locked"
         const val KEY_HUD_TEXT_SCALE = "hud_text_scale"
         const val KEY_HUD_ALPHA = "hud_alpha"
