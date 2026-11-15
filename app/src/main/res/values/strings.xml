@@ -142,6 +142,18 @@
     <string name="notif_shizuku_lost">Shizuku đã dừng — cảm ứng đã được nhả</string>
     <string name="background_start_failed">Không khởi động được service nền. Hãy kiểm tra quyền thông báo.</string>
 
+    <!-- Overlays: floating menu + performance HUD -->
+    <string name="overlay_section">Menu nổi &amp; HUD hiệu năng</string>
+    <string name="float_menu_switch">Menu nổi (nút tròn kéo thả, 2 tab Độ nhạy/HUD)</string>
+    <string name="hud_switch">Hiện HUD hiệu năng (nhiệt độ, FPS ước lượng, CPU)</string>
+    <string name="overlay_permission_ok">Quyền hiển thị trên ứng dụng khác: đã cấp.</string>
+    <string name="overlay_permission_missing">Chưa có quyền “Hiển thị trên ứng dụng khác” — HUD/menu sẽ không hiện. Bật một công tắc ở trên để mở trang cấp quyền.</string>
+    <string name="overlay_permission_needed">Cần quyền “Hiển thị trên ứng dụng khác” để vẽ HUD/menu nổi</string>
+    <string name="overlay_settings_failed">Không mở được trang cấp quyền. Hãy vào Cài đặt → Ứng dụng → SensiTune → Hiển thị trên ứng dụng khác.</string>
+    <string name="overlay_permission_missing_short">Thiếu quyền hiển thị trên ứng dụng khác — HUD/menu đang ẩn</string>
+    <string name="hud_note">HUD: mặc định khóa (chạm xuyên qua, không cản game). Mở khóa trong menu để kéo; tự khóa sau 15 giây. FPS là giá trị ước lượng từ SurfaceFlinger. Nhiệt độ &gt; 45°C vàng, &gt; 50°C đỏ. Overlay không ảnh hưởng engine/heartbeat.</string>
+    <string name="notif_released">Đã nhả cảm ứng</string>
+
     <!-- QS tile -->
     <string name="tile_label">SensiTune</string>
     <string name="tile_subtitle">Nhấn để nhả cảm ứng</string>

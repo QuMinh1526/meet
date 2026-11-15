@@ -43,6 +43,102 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_TEST_DONE, false)
         set(value) = sp.edit().putBoolean(KEY_TEST_DONE, value).apply()
 
+    // ------------------------------------------------------------------
+    // Overlay: floating menu + performance HUD
+    // ------------------------------------------------------------------
+
+    var floatMenuEnabled: Boolean
+        get() = sp.getBoolean(KEY_FLOAT_MENU, false)
+        set(value) = sp.edit().putBoolean(KEY_FLOAT_MENU, value).apply()
+
+    var hudEnabled: Boolean
+        get() = sp.getBoolean(KEY_HUD_ENABLED, false)
+        set(value) = sp.edit().putBoolean(KEY_HUD_ENABLED, value).apply()
+
+    /** Locked by default: the HUD is not touchable and cannot be dragged by accident. */
+    var hudLocked: Boolean
+        get() = sp.getBoolean(KEY_HUD_LOCKED, true)
+        set(value) = sp.edit().putBoolean(KEY_HUD_LOCKED, value).apply()
+
+    var hudTextScale: Float
+        get() = sp.getFloat(KEY_HUD_TEXT_SCALE, 1.0f).coerceIn(0.7f, 1.8f)
+        set(value) = sp.edit().putFloat(KEY_HUD_TEXT_SCALE, value.coerceIn(0.7f, 1.8f)).apply()
+
+    /** Untrusted-touch rule on Android 12: overlay opacity must stay <= 0.8. */
+    var hudAlpha: Float
+        get() = sp.getFloat(KEY_HUD_ALPHA, 0.8f).coerceIn(0.2f, 0.8f)
+        set(value) = sp.edit().putFloat(KEY_HUD_ALPHA, value.coerceIn(0.2f, 0.8f)).apply()
+
+    /** false = one row, true = vertical column. */
+    var hudVertical: Boolean
+        get() = sp.getBoolean(KEY_HUD_VERTICAL, true)
+        set(value) = sp.edit().putBoolean(KEY_HUD_VERTICAL, value).apply()
+
+    var tempWarnC: Float
+        get() = sp.getFloat(KEY_TEMP_WARN, 45f)
+        set(value) = sp.edit().putFloat(KEY_TEMP_WARN, value.coerceIn(30f, 90f)).apply()
+
+    var tempCritC: Float
+        get() = sp.getFloat(KEY_TEMP_CRIT, 50f)
+        set(value) = sp.edit().putFloat(KEY_TEMP_CRIT, value.coerceIn(35f, 100f)).apply()
+
+    /** Returns -1 when no position was saved for that orientation yet. */
+    fun hudX(landscape: Boolean): Int =
+        sp.getInt(if (landscape) KEY_HUD_X_LAND else KEY_HUD_X_PORT, -1)
+
+    fun hudY(landscape: Boolean): Int =
+        sp.getInt(if (landscape) KEY_HUD_Y_LAND else KEY_HUD_Y_PORT, -1)
+
+    fun setHudPos(x: Int, y: Int, landscape: Boolean) {
+        sp.edit()
+            .putInt(if (landscape) KEY_HUD_X_LAND else KEY_HUD_X_PORT, x)
+            .putInt(if (landscape) KEY_HUD_Y_LAND else KEY_HUD_Y_PORT, y)
+            .apply()
+    }
+
+    fun menuX(): Int = sp.getInt(KEY_MENU_X, -1)
+    fun menuY(): Int = sp.getInt(KEY_MENU_Y, -1)
+    fun setMenuPos(x: Int, y: Int) {
+        sp.edit().putInt(KEY_MENU_X, x).putInt(KEY_MENU_Y, y).apply()
+    }
+
+    /** Ordered list of every HUD metric and whether it is enabled. */
+    fun hudMetrics(): MutableList<Pair<String, Boolean>> {
+        val out = ArrayList<Pair<String, Boolean>>()
+        val raw = sp.getString(KEY_HUD_METRICS, null)
+        if (raw != null) {
+            try {
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    val name = o.optString("n", "")
+                    if (name.isNotEmpty()) out.add(Pair(name, o.optBoolean("on", false)))
+                }
+            } catch (t: Throwable) {
+                LogBuffer.error("Prefs", "hudMetrics parse failed", t)
+            }
+        }
+        if (out.isEmpty()) {
+            for (name in DEFAULT_HUD_ORDER) {
+                out.add(Pair(name, name in DEFAULT_HUD_ON))
+            }
+        }
+        return out
+    }
+
+    fun setHudMetrics(list: List<Pair<String, Boolean>>) {
+        val arr = JSONArray()
+        for ((name, on) in list) {
+            arr.put(JSONObject().put("n", name).put("on", on))
+        }
+        sp.edit().putString(KEY_HUD_METRICS, arr.toString()).apply()
+    }
+
+    /** CSV of enabled metrics, in display order; empty when nothing is on. */
+    fun hudEnabledCsv(): String = hudMetrics()
+        .filter { it.second }
+        .joinToString(",") { it.first }
+
     fun selectedPackages(): LinkedHashSet<String> {
         val out = LinkedHashSet<String>()
         val raw = sp.getString(KEY_TARGETS, "[]") ?: "[]"
@@ -113,5 +209,25 @@ class Prefs(context: Context) {
         const val KEY_TEST_DONE = "test_done"
         const val KEY_TARGETS = "target_packages"
         const val KEY_OVERRIDES = "per_app_overrides"
+        const val KEY_FLOAT_MENU = "float_menu_enabled"
+        const val KEY_HUD_ENABLED = "hud_enabled"
+        const val KEY_HUD_LOCKED = "hud_locked"
+        const val KEY_HUD_TEXT_SCALE = "hud_text_scale"
+        const val KEY_HUD_ALPHA = "hud_alpha"
+        const val KEY_HUD_VERTICAL = "hud_vertical"
+        const val KEY_HUD_METRICS = "hud_metrics"
+        const val KEY_HUD_X_PORT = "hud_x_portrait"
+        const val KEY_HUD_Y_PORT = "hud_y_portrait"
+        const val KEY_HUD_X_LAND = "hud_x_landscape"
+        const val KEY_HUD_Y_LAND = "hud_y_landscape"
+        const val KEY_MENU_X = "menu_x"
+        const val KEY_MENU_Y = "menu_y"
+        const val KEY_TEMP_WARN = "temp_warn_c"
+        const val KEY_TEMP_CRIT = "temp_crit_c"
+
+        val DEFAULT_HUD_ORDER = listOf(
+            "fps", "cpu", "gpu", "battery", "ram", "skin", "shell", "cpuPct", "cpuFreq"
+        )
+        val DEFAULT_HUD_ON = setOf("fps", "cpu", "gpu", "battery")
     }
 }

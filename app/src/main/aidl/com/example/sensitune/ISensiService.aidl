@@ -31,4 +31,14 @@ interface ISensiService {
 
     /** Non-grabbing capability report (uinput, devices, SELinux...). */
     String diagnose();
+
+    /**
+     * Tells the shell process which performance metrics the HUD currently needs
+     * (CSV: fps,cpu,gpu,battery,ram,skin,shell,cpuPct,cpuFreq) and which package
+     * is in the foreground. Empty package = let the shell detect it.
+     */
+    void configurePerf(String metricsCsv, String foregroundPackage);
+
+    /** One JSON snapshot of the configured metrics; never throws. */
+    String getPerfSnapshot();
 }

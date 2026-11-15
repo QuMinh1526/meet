@@ -51,6 +51,9 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
     private lateinit var tvEngineStatus: TextView
     private lateinit var tvStatusDetail: TextView
     private lateinit var tvUsageWarning: TextView
+    private lateinit var swFloatMenu: Switch
+    private lateinit var swHud: Switch
+    private lateinit var tvOverlayPermission: TextView
 
     private var suppressSwitchCallbacks = false
     private var suppressSeekCallbacks = false
@@ -67,6 +70,7 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
         bindViews()
         setupFactorSliders()
         setupSwitches()
+        setupOverlayControls()
         setupButtons()
 
         ShizukuHelper.init(this)
@@ -102,6 +106,66 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
         tvEngineStatus = findViewById(R.id.tvEngineStatus)
         tvStatusDetail = findViewById(R.id.tvStatusDetail)
         tvUsageWarning = findViewById(R.id.tvUsageWarning)
+        swFloatMenu = findViewById(R.id.swFloatMenu)
+        swHud = findViewById(R.id.swHud)
+        tvOverlayPermission = findViewById(R.id.tvOverlayPermission)
+    }
+
+    // ------------------------------------------------------------------
+    // Floating menu + HUD switches (overlay permission)
+    // ------------------------------------------------------------------
+
+    private fun setupOverlayControls() {
+        suppressSwitchCallbacks = true
+        swFloatMenu.isChecked = prefs.floatMenuEnabled
+        swHud.isChecked = prefs.hudEnabled
+        suppressSwitchCallbacks = false
+
+        swFloatMenu.setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
+            if (!suppressSwitchCallbacks) setOverlayPref(menu = true, on = checked)
+        }
+        swHud.setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
+            if (!suppressSwitchCallbacks) setOverlayPref(menu = false, on = checked)
+        }
+    }
+
+    private fun setOverlayPref(menu: Boolean, on: Boolean) {
+        if (menu) prefs.floatMenuEnabled = on else prefs.hudEnabled = on
+        LogBuffer.info("MainActivity", "${if (menu) "floatMenu" else "hud"} -> $on")
+        if (on && !OverlayUi.canDraw(this)) {
+            toast(getString(R.string.overlay_permission_needed))
+            openOverlaySettings()
+        }
+        if (on) requestNotificationPermissionIfNeeded()
+        // The foreground service hosts both overlays; starting it is harmless when
+        // the engine is off (it will not enable the engine by itself).
+        startSensiService()
+        updateOverlayUi()
+    }
+
+    private fun openOverlaySettings() {
+        try {
+            startActivity(OverlayUi.overlayIntent(this))
+        } catch (t: Throwable) {
+            LogBuffer.error("MainActivity", "cannot open overlay settings", t)
+            toast(getString(R.string.overlay_settings_failed))
+        }
+    }
+
+    private fun updateOverlayUi() {
+        suppressSwitchCallbacks = true
+        swFloatMenu.isChecked = prefs.floatMenuEnabled
+        swHud.isChecked = prefs.hudEnabled
+        suppressSwitchCallbacks = false
+        val granted = OverlayUi.canDraw(this)
+        tvOverlayPermission.text = if (granted) {
+            getString(R.string.overlay_permission_ok)
+        } else {
+            getString(R.string.overlay_permission_missing)
+        }
+        tvOverlayPermission.setTextColor(
+            if (granted) 0xFF2E7D32.toInt() else 0xFFD32F2F.toInt()
+        )
     }
 
     // ------------------------------------------------------------------
@@ -872,6 +936,10 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
     override fun onResume() {
         super.onResume()
         updateModeUi()
+        updateOverlayUi()
+        if ((prefs.hudEnabled || prefs.floatMenuEnabled) && OverlayUi.canDraw(this)) {
+            startSensiService()
+        }
     }
 
     // ------------------------------------------------------------------

@@ -192,6 +192,46 @@
             android:layout_height="wrap_content"
             android:textSize="12sp" />
 
+        <!-- Overlays: floating menu + performance HUD -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="16dp"
+            android:background="#33000000" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/overlay_section"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <Switch
+            android:id="@+id/swFloatMenu"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/float_menu_switch" />
+
+        <Switch
+            android:id="@+id/swHud"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/hud_switch" />
+
+        <TextView
+            android:id="@+id/tvOverlayPermission"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="12sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/hud_note"
+            android:textSize="10sp" />
+
         <!-- Status -->
         <View
             android:layout_width="match_parent"

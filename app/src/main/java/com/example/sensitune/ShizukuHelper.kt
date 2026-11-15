@@ -399,6 +399,16 @@ object ShizukuHelper {
 
     fun diagnoseJson(): String? = call("diagnose", null) { it.diagnose() }
 
+    /** Tells the shell process which HUD metrics are needed right now. */
+    fun configurePerf(metricsCsv: String, foregroundPackage: String?) {
+        call("configurePerf", Unit) {
+            it.configurePerf(metricsCsv, foregroundPackage ?: "")
+        }
+    }
+
+    /** One HUD sample; null when the UserService is not connected. */
+    fun perfSnapshot(): String? = call("getPerfSnapshot", null) { it.getPerfSnapshot() }
+
     fun destroyService() {
         call("destroy", Unit) { it.destroy() }
     }

@@ -65,7 +65,11 @@ app/src/main/java/com/example/sensitune/
     SensiUserService.kt      # UserService chạy trong tiến trình shell
     NativeBridge.kt          # khai báo JNI + bảng mã lỗi tiếng Việt
     ShizukuHelper.kt         # Shizuku permission/bind + gọi AIDL an toàn
-    SensiService.kt          # foreground service (specialUse) + heartbeat + watcher
+    SensiService.kt          # foreground service (specialUse) + heartbeat + watcher + overlay host
+    PerfHud.kt               # HUD overlay: khóa/kéo thả, màu ngưỡng, xoay màn hình
+    FloatMenu.kt             # nút tròn + bảng 2 tab Độ nhạy/HUD
+    PerfSampler.kt           # đọc thermal/CPU/FPS trong tiến trình shell
+    OverlayUi.kt             # quyền overlay, kích thước màn hình, view phụ trợ
     ForegroundWatcher.kt     # UsageStats 500 ms, debounce 300 ms
     ReleaseReceiver.kt       # nút "Nhả cảm ứng" trên notification
     SensiTileService.kt      # Quick Settings tile
@@ -229,3 +233,30 @@ mà không cần làm gì.
 - Watchdog, heartbeat, phím cứng và nút đỏ luôn có hiệu lực cao hơn logic theo app; nhả khẩn cấp
   sẽ tắt luôn chế độ theo app cho tới khi người dùng bật lại bằng tay.
 - Ứng dụng không tự bật khi khởi động máy và không chạy nền nếu người dùng không chọn.
+- HUD/menu cần quyền **Hiển thị trên ứng dụng khác**; thiếu quyền thì chỉ ẩn overlay, engine vẫn nguyên.
+- FPS chỉ là **ước lượng** từ `dumpsys SurfaceFlinger`; không tìm thấy layer → hiện `--`, không báo lỗi.
+- Nhiệt độ lấy từ `/sys/class/thermal` (đọc một lần, cache đường dẫn); zone trả giá trị vô lý
+  (ví dụ `-40000`) bị bỏ qua. GPU % bị chặn trên nhiều ROM nên không có ô này.
+
+## 10. HUD hiệu năng & menu nổi
+
+Bật **Menu nổi** / **Hiện HUD** ở màn hình chính (cần quyền Hiển thị trên ứng dụng khác).
+Cả hai overlay do `SensiService` (FGS) host, dùng View thường — không Compose/Fragment.
+
+- **Menu nổi**: nút tròn 48dp, kéo thả, tự dính mép và lưu vị trí. Chạm để mở bảng:
+  - tab **Độ nhạy**: hệ số X/Y bằng nút −/+ (bước 0.05, 0.50–2.50), công tắc Khóa X=Y,
+    nút đỏ **NHẢ**; không dùng slider vì ngón kéo cũng bị nhân hệ số;
+  - tab **HUD**: bật/tắt HUD, bật/tắt từng chỉ số + đổi thứ tự bằng ↑/↓, cỡ chữ, độ mờ,
+    kiểu hàng ngang/cột dọc, ngưỡng vàng/đỏ, khóa/mở khóa vị trí và 4 nút mũi tên 8px.
+  Bảng tự đóng sau 5 giây không chạm.
+- **HUD**: mỗi chỉ số một ô (`FPS ~`, `CPU°C`, `GPU°C`, `Pin°C`, `RAM°C`, `Thân°C`, `Lưng°C`,
+  `CPU%`, xung CPU). Nhiệt độ > ngưỡng vàng/đỏ đổi màu. Mặc định **khóa**: cờ
+  `FLAG_NOT_TOUCHABLE` nên chạm xuyên qua game, không cản. Mở khóa → viền sáng + 🔓, kéo được,
+  tự khóa sau 15 giây; chạm giữ 1 giây trên HUD để khóa lại. Vị trí lưu riêng cho dọc/ngang.
+- **Lấy mẫu**: HandlerThread riêng, 1000 ms/lần, chỉ khi HUD bật + màn hình sáng + service đã bind.
+  Không chồng request (lượt trước chưa xong thì bỏ lượt). Mỗi lần lấy mẫu log thời gian.
+  Chỉ số nào tắt thì không yêu cầu shell đọc. Lỗi đọc chỉ ẩn ô đó và log một lần.
+- **Độc lập engine**: overlay lỗi/bị gỡ không đụng tới grab, heartbeat hay logic nhả; heartbeat
+  vẫn chạy trên handler riêng và phím cứng/nút đỏ vẫn nhả ngay.
+- **Vòng đời**: mọi `addView/removeView` bọc `try/catch` + cờ `attached`; `onDestroy`,
+  `onTaskRemoved`, mất quyền overlay đều gỡ overlay và dừng sampler; xoay màn hình tính lại vị trí.

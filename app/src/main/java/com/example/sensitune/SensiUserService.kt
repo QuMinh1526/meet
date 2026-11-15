@@ -26,6 +26,9 @@ class SensiUserService(private val context: Context) : ISensiService.Stub() {
      */
     private var lastNativeServed = 0L
 
+    /** HUD sampling lives in the shell process; this never touches the engine. */
+    private val perf = PerfSampler()
+
     init {
         LogBuffer.info(
             TAG,
@@ -274,6 +277,37 @@ class SensiUserService(private val context: Context) : ISensiService.Stub() {
             LogBuffer.error(TAG, "diagnose merge failed", t)
         }
         return obj.toString()
+    }
+
+    override fun configurePerf(metricsCsv: String, foregroundPackage: String) {
+        try {
+            perf.configure(metricsCsv, foregroundPackage)
+        } catch (t: Throwable) {
+            LogBuffer.error(TAG, "configurePerf failed", t)
+        }
+    }
+
+    override fun getPerfSnapshot(): String {
+        return try {
+            val json = perf.snapshot()
+            try {
+                val o = JSONObject(json)
+                o.put("uid", Process.myUid())
+                o.toString()
+            } catch (_: Throwable) {
+                json
+            }
+        } catch (t: Throwable) {
+            LogBuffer.error(TAG, "getPerfSnapshot failed", t)
+            try {
+                JSONObject()
+                    .put("ts", System.currentTimeMillis())
+                    .put("errors", JSONArray().put("snapshot"))
+                    .toString()
+            } catch (_: Throwable) {
+                "{\"errors\":[\"snapshot\"]}"
+            }
+        }
     }
 
     private fun ensureLib(): Boolean {
