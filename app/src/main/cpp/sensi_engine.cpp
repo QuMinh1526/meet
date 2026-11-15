@@ -15,6 +15,8 @@
  */
 
 #include "sensi_engine.h"
+#include "sensi_abs.h"
+#include "sensi_json.h"
 
 #include <android/log.h>
 
@@ -117,27 +119,7 @@ static void log_message(int level, const char *fmt, ...) {
 #define LOGE(...) log_message(LVL_ERROR, __VA_ARGS__)
 
 static std::string json_escape(const char *s) {
-    std::string out;
-    if (!s) return out;
-    for (const char *p = s; *p; ++p) {
-        unsigned char c = (unsigned char) *p;
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (c < 0x20) {
-                    char buf[8];
-                    snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                } else {
-                    out += (char) c;
-                }
-        }
-    }
-    return out;
+    return s ? sensitune::sensi_json_escape(std::string(s)) : std::string();
 }
 
 static std::string json_escape(const std::string &s) { return json_escape(s.c_str()); }
@@ -302,21 +284,37 @@ static std::string ev_bits_summary(const std::vector<unsigned long> &bits) {
     return s.empty() ? "none" : s;
 }
 
-/* Every abs axis this node exposes, with its reported min/max/res/fuzz/flat. */
-static std::string abs_bits_summary(int fd, const std::vector<unsigned long> &bits) {
+static std::string hex_bytes(const uint8_t *bytes, size_t n) {
+    std::string s;
+    char part[4];
+    for (size_t i = 0; i < n; ++i) {
+        snprintf(part, sizeof(part), "%02x", bytes[i]);
+        if (i) s += ' ';
+        s += part;
+    }
+    return s;
+}
+
+/* The real axes of this node, from both the bitmap and the EVIOCGABS probes. */
+static std::string abs_caps_summary(const sensitune::AbsCaps &caps,
+                                   const sensitune::AbsEvaluation &eval) {
     std::string s;
     for (int code = 0; code <= ABS_MAX; ++code) {
-        if (!bit_test(bits, code)) continue;
-        input_absinfo ai = {};
-        char part[160];
-        if (ioctl(fd, EVIOCGABS(code), &ai) == 0) {
-            snprintf(part, sizeof(part), "%s(%d) min=%d max=%d res=%d fuzz=%d flat=%d",
-                     abs_code_name(code), code, ai.minimum, ai.maximum,
-                     ai.resolution, ai.fuzz, ai.flat);
+        const sensitune::AxisProbe &a = caps.axes[code];
+        if (!a.bit_set && !a.getabs_ok) continue;
+        std::string part = abs_code_name(code);
+        part += '(' + std::to_string(code) + ')';
+        if (a.getabs_ok) {
+            part += " min=" + std::to_string(a.minimum) +
+                    " max=" + std::to_string(a.maximum) +
+                    " res=" + std::to_string(a.resolution) +
+                    " fuzz=" + std::to_string(a.fuzz) +
+                    " flat=" + std::to_string(a.flat);
         } else {
-            snprintf(part, sizeof(part), "%s(%d) EVIOCGABS failed: %s (errno=%d)",
-                     abs_code_name(code), code, strerror(errno), errno);
+            part += " EVIOCGABS_FAILED";
         }
+        part += a.bit_set ? " [bitmask]" : " [probe-only]";
+        if (eval.present[code] && !a.bit_set) part += " (virtual: copied)";
         if (!s.empty()) s += "; ";
         s += part;
     }
@@ -344,19 +342,64 @@ static bool read_candidate_info(int fd, const std::string &path, TouchCandidate 
         return false;
     }
 
-    std::vector<unsigned long> abs_bits;
-    if (!query_bits(fd, EVIOCGBIT(EV_ABS, bitmap_words(ABS_MAX)), ABS_MAX, &abs_bits)) {
-        LOGI("scan %s \"%s\": EVIOCGBIT(EV_ABS) failed: %s (errno=%d) -> rejected",
-             path.c_str(), name, strerror(errno), errno);
+    // Read the ABS bitmap into an explicit byte buffer. The length handed to
+    // EVIOCGBIT is (ABS_MAX / 8) + 1 bytes, the buffer is zeroed first and the
+    // return value/errno are logged. Some drivers return success but a zero
+    // bitmap, so this alone must never reject the device.
+    uint8_t abs_bytes[sensitune::kAbsBitmapBytes] = {};
+    errno = 0;
+    int abs_rc = ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abs_bytes)), abs_bytes);
+    int abs_ioctl_errno = errno;
+    LOGI("scan %s \"%s\": EVIOCGBIT(EV_ABS, len=%zu) ret=%d errno=%d (%s) bytes=[%s]",
+         path.c_str(), name, sizeof(abs_bytes), abs_rc, abs_ioctl_errno,
+         abs_rc < 0 ? strerror(abs_ioctl_errno) : "ok",
+         hex_bytes(abs_bytes, sizeof(abs_bytes)).c_str());
+
+    sensitune::AbsCaps caps;
+    caps.ev_abs = true;
+    caps.bitmask_ok = abs_rc >= 0;
+    for (int code = 0; code < ABS_CNT; ++code) {
+        caps.axes[code].bit_set =
+                sensitune::abs_bit_test(abs_bytes, sizeof(abs_bytes), code);
+    }
+
+    // Probe every bitmap axis PLUS the interesting axes unconditionally, so a
+    // broken/empty bitmap still yields real ranges for the virtual device.
+    for (int code = 0; code < ABS_CNT; ++code) {
+        const bool from_mask = caps.axes[code].bit_set;
+        if (!from_mask && !sensitune::abs_probe_axis(code)) continue;
+
+        input_absinfo ai = {};
+        errno = 0;
+        int rc = ioctl(fd, EVIOCGABS(code), &ai);
+        int e = errno;
+        if (rc == 0) {
+            caps.axes[code].getabs_ok = true;
+            caps.axes[code].minimum = ai.minimum;
+            caps.axes[code].maximum = ai.maximum;
+            caps.axes[code].resolution = ai.resolution;
+            caps.axes[code].fuzz = ai.fuzz;
+            caps.axes[code].flat = ai.flat;
+        }
+        LOGI("scan %s axis code=%d (%s) bitmask=%d EVIOCGABS ret=%d errno=%d (%s) "
+             "min=%d max=%d res=%d fuzz=%d flat=%d",
+             path.c_str(), code, abs_code_name(code), from_mask ? 1 : 0, rc, e,
+             rc == 0 ? "ok" : strerror(e), rc == 0 ? ai.minimum : 0,
+             rc == 0 ? ai.maximum : 0, rc == 0 ? ai.resolution : 0,
+             rc == 0 ? ai.fuzz : 0, rc == 0 ? ai.flat : 0);
+    }
+
+    sensitune::AbsEvaluation eval = sensitune::evaluate_abs(caps);
+    LOGI("scan %s \"%s\": ABS axes = [%s]", path.c_str(), name,
+         abs_caps_summary(caps, eval).c_str());
+    if (!eval.accepted) {
+        LOGI("scan %s \"%s\": rejected: %s", path.c_str(), name, eval.reason);
         return false;
     }
-    LOGI("scan %s \"%s\": ABS axes = [%s]", path.c_str(), name,
-         abs_bits_summary(fd, abs_bits).c_str());
-
-    if (!bit_test(abs_bits, ABS_MT_POSITION_X) || !bit_test(abs_bits, ABS_MT_POSITION_Y)) {
-        LOGI("scan %s \"%s\": missing ABS_MT_POSITION_X and/or ABS_MT_POSITION_Y -> rejected",
+    if (eval.probe_only[ABS_MT_POSITION_X] || eval.probe_only[ABS_MT_POSITION_Y]) {
+        LOGW("scan %s \"%s\": ABS bitmap did not advertise POSITION_X/Y but "
+             "EVIOCGABS returned real ranges - accepting via probe fallback",
              path.c_str(), name);
-        return false;
     }
 
     int props = 0;
@@ -369,59 +412,41 @@ static bool read_candidate_info(int fd, const std::string &path, TouchCandidate 
     LOGI("scan %s \"%s\": props=0x%x INPUT_PROP_DIRECT=%d", path.c_str(), name, props,
          direct ? 1 : 0);
 
-    input_absinfo ax = {}, ay = {}, aslot = {};
-    if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &ax) < 0) {
-        LOGI("scan %s \"%s\": EVIOCGABS(POSITION_X) failed: %s (errno=%d) -> rejected",
-             path.c_str(), name, strerror(errno), errno);
-        return false;
-    }
-    if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &ay) < 0) {
-        LOGI("scan %s \"%s\": EVIOCGABS(POSITION_Y) failed: %s (errno=%d) -> rejected",
-             path.c_str(), name, strerror(errno), errno);
-        return false;
-    }
-    if (ax.maximum <= ax.minimum || ay.maximum <= ay.minimum) {
-        LOGI("scan %s \"%s\": degenerate POSITION range x=%d..%d y=%d..%d -> rejected",
-             path.c_str(), name, ax.minimum, ax.maximum, ay.minimum, ay.maximum);
-        return false;
-    }
-
     out->path = path;
     out->name = name;
     out->fd = fd;
     out->direct = direct;
-    out->min_x = ax.minimum;
-    out->max_x = ax.maximum;
-    out->min_y = ay.minimum;
-    out->max_y = ay.maximum;
-    out->res_x = ax.resolution;
-    out->res_y = ay.resolution;
+    out->min_x = eval.min_x;
+    out->max_x = eval.max_x;
+    out->min_y = eval.min_y;
+    out->max_y = eval.max_y;
+    out->res_x = eval.res_x;
+    out->res_y = eval.res_y;
     ioctl(fd, EVIOCGID, &out->id);
 
-    if (bit_test(abs_bits, ABS_MT_SLOT)) {
-        out->has_slot_axis = true;
-        if (ioctl(fd, EVIOCGABS(ABS_MT_SLOT), &aslot) == 0) {
-            int slots = aslot.maximum + 1;
-            if (slots < 1) slots = 1;
-            if (slots > MAX_SLOTS) {
-                LOGW("%s reports %d slots, capped to %d", path.c_str(), slots, MAX_SLOTS);
-                slots = MAX_SLOTS;
-            }
-            out->max_slots = slots;
-        } else {
-            LOGW("EVIOCGABS(ABS_MT_SLOT) failed for %s: %s (errno=%d)",
-                 path.c_str(), strerror(errno), errno);
-        }
-    } else {
-        out->has_slot_axis = false;
-        out->max_slots = 1;
-    }
+    out->has_slot_axis = eval.has_slot_axis;
+    out->max_slots = eval.max_slots;
+    LOGI("scan %s \"%s\": slot axis=%d max_slots=%d (from %s)", path.c_str(), name,
+         out->has_slot_axis ? 1 : 0, out->max_slots,
+         eval.present[ABS_MT_SLOT] ? "EVIOCGABS" : "bitmap/default");
 
     unsigned long long w = (unsigned long long) (out->max_x - out->min_x);
     unsigned long long h = (unsigned long long) (out->max_y - out->min_y);
     out->area = (w > 0 && h > 0) ? w * h : 0;
 
-    query_bits(fd, EVIOCGBIT(EV_ABS, bitmap_words(ABS_MAX)), ABS_MAX, &out->abs_bits);
+    // Advertise exactly the axes that have real ranges, including ones the
+    // bitmap omitted (slot/tracking id/pressure/touch major/width major).
+    out->abs_bits.assign(bitmap_words(ABS_MAX), 0);
+    int copied_axes = 0;
+    for (int code = 0; code <= ABS_MAX; ++code) {
+        if (!eval.present[code]) continue;
+        out->abs_bits[(size_t) code / (8 * sizeof(unsigned long))] |=
+                1UL << (code % (8 * sizeof(unsigned long)));
+        copied_axes++;
+    }
+    LOGI("scan %s \"%s\": will copy %d abs axes to virtual device", path.c_str(),
+         name, copied_axes);
+
     query_bits(fd, EVIOCGBIT(EV_KEY, bitmap_words(KEY_MAX)), KEY_MAX, &out->key_bits);
 
     LOGI("scan %s \"%s\": ACCEPTED direct=%d x=%d..%d y=%d..%d slots=%d "
@@ -1739,18 +1764,17 @@ char *sensi_get_logs_json(int since_seq) {
         const LogEntry &e = g_logs[seq % LOG_RING_CAPACITY];
         if (e.seq != seq) continue;
         if (since_seq > 0 && e.seq <= (int64_t) since_seq) continue;
-        if (!first) out += ",";
-        first = false;
-        char head[160];
-        snprintf(head, sizeof(head),
-                 "{\"seq\":%lld,\"ts\":%lld,\"level\":%d,\"thread\":\"%s\",\"msg\":\"%s\"}",
-                 (long long) e.seq, (long long) e.ts_ms, e.level,
-                 json_escape(e.thread).c_str(), json_escape(e.msg).c_str());
-        out += head;
-        if (out.size() > 512 * 1024) {
+        // Build the record as a complete string. A fixed-size snprintf here used
+        // to cut long messages mid-string and break the whole JSON array.
+        std::string record = sensitune::sensi_log_record_json(
+                (long long) e.seq, (long long) e.ts_ms, e.level, e.thread, e.msg);
+        if (out.size() + record.size() + 2 > 512 * 1024) {
             truncated = true;
             break;
         }
+        if (!first) out += ",";
+        first = false;
+        out += record;
     }
     out += "]";
     // NOTE: never log while holding g_log_mutex (log_message locks it too).

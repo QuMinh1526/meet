@@ -26,6 +26,10 @@ class SensiUserService(private val context: Context) : ISensiService.Stub() {
      */
     private var lastNativeServed = 0L
 
+    /** Dedupe for a corrupt native log payload: log once, then only count. */
+    private var badNativeLogHash = Int.MIN_VALUE
+    private var badNativeLogCount = 0
+
     /** HUD sampling lives in the shell process; this never touches the engine. */
     private val perf = PerfSampler()
 
@@ -182,12 +186,19 @@ class SensiUserService(private val context: Context) : ISensiService.Stub() {
                     sinceSeq >= LogBuffer.SEQ_OFFSET -> lastNativeServed
                     else -> sinceSeq.toLong()
                 }
-                val nativeArr = JSONArray(NativeBridge.getLogs(nativeSince.toInt()))
-                for (i in 0 until nativeArr.length()) {
-                    val o = nativeArr.getJSONObject(i)
-                    val seq = o.optLong("seq", 0L)
-                    if (seq > lastNativeServed) lastNativeServed = seq
-                    merged.add(o)
+                val raw = NativeBridge.getLogs(nativeSince.toInt())
+                try {
+                    val nativeArr = JSONArray(raw)
+                    for (i in 0 until nativeArr.length()) {
+                        val o = nativeArr.getJSONObject(i)
+                        val seq = o.optLong("seq", 0L)
+                        if (seq > lastNativeServed) lastNativeServed = seq
+                        merged.add(o)
+                    }
+                    badNativeLogHash = Int.MIN_VALUE
+                    badNativeLogCount = 0
+                } catch (t: Throwable) {
+                    handleBadNativeLogs(raw, t, merged)
                 }
             }
         } catch (t: Throwable) {
@@ -216,6 +227,48 @@ class SensiUserService(private val context: Context) : ISensiService.Stub() {
         val arr = JSONArray()
         merged.forEach { arr.put(it) }
         return arr.toString()
+    }
+
+    /**
+     * The native ring is expected to be valid JSON. If it is not, surface the
+     * raw payload once (so the log screen stays useful) and only count repeats
+     * instead of writing the same error every poll.
+     */
+    private fun handleBadNativeLogs(
+        raw: String,
+        t: Throwable,
+        merged: ArrayList<JSONObject>
+    ) {
+        val hash = raw.hashCode()
+        val type = t.javaClass.simpleName
+        if (hash != badNativeLogHash) {
+            badNativeLogHash = hash
+            badNativeLogCount = 1
+            LogBuffer.error(
+                TAG,
+                "getLogs: native JSON invalid ($type: ${t.message}); raw=${raw.take(400)}"
+            )
+            try {
+                merged.add(
+                    JSONObject()
+                        .put("seq", lastNativeServed)
+                        .put("ts", System.currentTimeMillis())
+                        .put("level", LogBuffer.LEVEL_ERROR)
+                        .put("thread", TAG)
+                        .put("msg", "JSON log native lỗi ($type): ${raw.take(600)}")
+                )
+            } catch (_: Throwable) {
+                // Never let a diagnostic entry break getLogs().
+            }
+        } else {
+            badNativeLogCount++
+            if (badNativeLogCount == 2 || badNativeLogCount % 10 == 0) {
+                LogBuffer.warn(
+                    TAG,
+                    "getLogs: native JSON vẫn lỗi, lặp ${badNativeLogCount} lần"
+                )
+            }
+        }
     }
 
     override fun emergencyRelease() {

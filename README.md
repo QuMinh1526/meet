@@ -107,7 +107,18 @@ Yêu cầu: Android Studio mới (AGP 8.5+), JDK 17, Android SDK 34, NDK 26.1.10
 APK debug: `app/build/outputs/apk/debug/app-debug.apk`.
 
 APK release đã ký (zipalign + Signature Scheme v2/v3):
-**`release/SensiTune-1.0.0.apk`** — xem `release/README.md` để biết fingerprint và cách verify/install.
+**`release/SensiTune-1.0.1.apk`** — xem `release/README.md` để biết fingerprint và cách verify/install.
+
+### Test host cho phần dò ABS và JSON log
+
+Hai helper thuần (không phụ thuộc Android) nằm trong `app/src/main/cpp/sensi_abs.h` và
+`sensi_json.h`; test dùng đúng dữ liệu `/dev/input/event1` của OPPO CPH2113
+(bitmap ABS rỗng nhưng `EVIOCGABS` vẫn trả range thật):
+
+```bash
+scripts/run-native-tests.sh
+# native host tests: OK (event1 fallback accepted, JSON intact)
+```
 
 ### Native library phải được giải nén ra đĩa
 
@@ -224,6 +235,10 @@ mà không cần làm gì.
 
 - Cần `/dev/uinput` mở được từ uid 2000. Một số ROM chặn bằng SELinux → app báo **không hỗ trợ**
   và **không grab** (thà không chạy còn hơn grab mà không chắc).
+- Không tin `EVIOCGBIT(EV_ABS)`: một số ROM (OPPO CPH2113) trả bitmap rỗng dù thiết bị có đủ
+  trục. Engine đọc bitmap vào buffer byte đã zero + log hex/errno, rồi **luôn** thử
+  `EVIOCGABS` cho X/Y, slot, tracking id, pressure, touch/width major; range thật từ
+  `EVIOCGABS` được dùng để tạo thiết bị ảo dù bitmap thiếu.
 - Không bắt buộc `INPUT_PROP_DIRECT`: thiếu cờ này chỉ làm thiết bị xếp hạng thấp hơn.
 - Không cần đọc `/proc/bus/input/devices` (một số ROM Android 12 chặn shell đọc file này):
   verify dùng `UI_GET_SYSNAME`/sysfs, diff `/dev/input` + inotify, và `EVIOCGNAME` trên node mới.
