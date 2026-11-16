@@ -55,6 +55,10 @@ class TabBar(
         if (notify) onTabSelected?.invoke(selected)
     }
 
+    fun setTitle(index: Int, title: String) {
+        tabViews.getOrNull(index)?.text = title
+    }
+
     private fun render() {
         for ((index, view) in tabViews.withIndex()) {
             val active = index == selected

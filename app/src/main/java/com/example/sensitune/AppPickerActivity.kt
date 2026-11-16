@@ -18,6 +18,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.example.sensitune.ui.kit.LabeledSlider
 import com.example.sensitune.ui.kit.SectionCard
+import com.example.sensitune.ui.kit.ToggleRow
 
 /**
  * Picks target apps for "chỉ trong app đã chọn" and optional per-app X/Y factors.
@@ -141,21 +142,30 @@ class AppPickerActivity : Activity() {
         val card = SectionCard(this, getString(R.string.picker_factor_hint))
         val start = row.override ?: Pair(1.0f, 1.0f)
         val sliderX = LabeledSlider(
-            this, getString(R.string.factor_x_horizontal), 0.5f, 10f, 0.05f, start.first
+            this, getString(R.string.factor_x_horizontal), 0.5f, 4f, 0.05f, start.first.coerceIn(0.5f, 4f)
         )
         val sliderY = LabeledSlider(
-            this, getString(R.string.factor_y_vertical), 0.5f, 10f, 0.05f, start.second
+            this, getString(R.string.factor_y_vertical), 0.5f, 4f, 0.05f, start.second.coerceIn(0.5f, 4f)
         )
         card.addRow(sliderX)
         card.addRow(sliderY)
+        val modeRow = ToggleRow(
+            this, getString(R.string.picker_drag_mode),
+            prefs.modeFor(row.pkg) == 1
+        )
+        modeRow.onCheckedChange = { checked ->
+            prefs.setModeFor(row.pkg, if (checked) 1 else 0)
+            LogBuffer.info("AppPicker", "mode for ${row.pkg} -> ${if (checked) "DRAG" else "SENSITIVITY"}")
+        }
+        card.addRow(modeRow)
         container.addView(card)
 
         val dialog = AlertDialog.Builder(this)
             .setTitle(row.label)
             .setView(container)
             .setPositiveButton(android.R.string.ok) { _, _ ->
-                val cx = sliderX.currentValue().coerceIn(0.5f, 10f)
-                val cy = sliderY.currentValue().coerceIn(0.5f, 10f)
+                val cx = sliderX.currentValue().coerceIn(0.5f, 4f)
+                val cy = sliderY.currentValue().coerceIn(0.5f, 4f)
                 row.override = Pair(cx, cy)
                 toast(getString(R.string.picker_override_set, cx, cy))
                 adapter.notifyDataSetChanged()
@@ -169,6 +179,7 @@ class AppPickerActivity : Activity() {
         dialog.setOnDismissListener {
             sliderX.release()
             sliderY.release()
+            modeRow.release()
             card.release()
         }
         dialog.show()

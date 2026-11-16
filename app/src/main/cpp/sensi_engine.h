@@ -38,6 +38,17 @@ int sensi_set_scaling_suspended(int suspended);
 int sensi_set_edge_margin(int percent);
 int sensi_set_soft_recenter(int enabled);
 int sensi_set_reanchor(int enabled);
+/* 0 = Sensitivity, 1 = Drag. Pinned per finger at touch down. */
+int sensi_set_mode(int mode);
+/* style: 0..8, enabled, intensity 0..100, spring stiffness/damping. */
+int sensi_set_style(int style, int enabled, int intensity, float stiffness, float damping);
+/* value 0..100, shape 0..9, easing 0..2, direction 0..4, Lref px, stop, amp 0..50%, period 20..300, vRef px/ms. */
+int sensi_set_drag_config(int value_pct, int shape, int easing, int direction,
+                          int length_ref_px, int stop_outside, int noise_amp_pct,
+                          int noise_period_px, float velocity_ref_px_ms);
+/* Circle in screen px. Invalid/empty zone (radius 0) = full pass-through. */
+int sensi_set_drag_zone(int cx, int cy, int radius, int screen_w, int screen_h,
+                        int rotation);
 int sensi_heartbeat(void);
 int sensi_emergency_release(const char *reason);
 char *sensi_get_status_json(void);

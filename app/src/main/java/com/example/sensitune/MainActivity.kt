@@ -61,6 +61,7 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
     private lateinit var swHud: Switch
     private lateinit var swClockHud: Switch
     private lateinit var tvOverlayPermission: TextView
+    private lateinit var btnMode: Button
 
     private var suppressSwitchCallbacks = false
     private var testing = false
@@ -97,6 +98,7 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
 
         prefs = Prefs(this)
         bindViews()
+        setupModeSection()
         setupFactorSliders()
         setupEdgeSettings()
         setupSwitches()
@@ -211,13 +213,107 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
     // Sensitivity + edge settings (shared ui.kit widgets)
     // ------------------------------------------------------------------
 
+    /** "Mode ▾" at the top: Sensitivity or Drag, one at a time. */
+    private fun setupModeSection() {
+        val card = SectionCard(this, getString(R.string.mode_section))
+        btnMode = Button(this).apply {
+            text = modeText(prefs.mode)
+            textSize = 14f
+            minimumHeight = (48 * resources.displayMetrics.density).toInt()
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle(R.string.mode_section)
+                    .setItems(
+                        arrayOf(
+                            getString(R.string.mode_sensitivity),
+                            getString(R.string.mode_drag)
+                        )
+                    ) { _, which ->
+                        prefs.mode = which
+                        if (prefs.onlyInSelectedApps) {
+                            prefs.setModeFor(SensiService.currentForeground, which)
+                        }
+                        text = modeText(which)
+                        LogBuffer.info("MainActivity", "mode -> $which")
+                        pushModeStyleDrag()
+                        if (prefs.enabled) {
+                            if (which == 1) startSensiService()
+                            refreshSensiService()
+                        }
+                    }
+                    .show()
+            }
+        }
+        card.addRow(btnMode)
+        card.addRow(
+            Button(this).apply {
+                text = getString(R.string.open_drag_settings)
+                textSize = 13f
+                setOnClickListener {
+                    startActivity(Intent(this@MainActivity, DragSettingsActivity::class.java))
+                }
+            }
+        )
+        card.addRow(
+            Button(this).apply {
+                text = getString(R.string.open_testpad)
+                textSize = 13f
+                setOnClickListener {
+                    startActivity(Intent(this@MainActivity, TestPadActivity::class.java))
+                }
+            }
+        )
+        card.addRow(
+            TextView(this).apply {
+                text = getString(R.string.mode_hint)
+                setTextColor(0xFF607D8B.toInt())
+                textSize = 10f
+            }
+        )
+        llSensitivity.addView(card)
+    }
+
+    private fun modeText(mode: Int): String = if (mode == 1) {
+        getString(R.string.mode_drag)
+    } else {
+        getString(R.string.mode_sensitivity)
+    }
+
+    private fun pushModeStyleDrag() {
+        if (ShizukuHelper.service == null || (!prefs.enabled && !testing)) return
+        val mode = prefs.mode
+        val styleEnabled = prefs.styleEnabled
+        val styleId = prefs.styleId
+        val intensity = prefs.styleIntensity
+        val k = prefs.styleStiffness
+        val c = prefs.styleDamping
+        val value = prefs.dragValue
+        val shape = prefs.dragShape
+        val easing = prefs.dragEasing
+        val direction = prefs.dragDirection
+        val lref = prefs.dragLengthRef
+        val stop = prefs.dragStopOutside
+        val amp = prefs.dragNoiseAmp
+        val period = prefs.dragNoisePeriod
+        val vref = prefs.dragVelocityRef
+        postEngineIo("push mode/style/drag") {
+            ShizukuHelper.setMode(mode)
+            ShizukuHelper.setStyle(styleId, styleEnabled, intensity, k, c)
+            ShizukuHelper.setDragConfig(
+                value, shape, easing, direction, lref, stop, amp, period, vref
+            )
+        }
+    }
+
     private fun setupFactorSliders() {
         val card = SectionCard(this, getString(R.string.sensitivity_section))
         sliderFactorX = LabeledSlider(
-            this, getString(R.string.factor_x_horizontal), 0.50f, 10f, 0.05f, prefs.factorX
+            this, getString(R.string.factor_x_horizontal), 0.50f, 4f, 0.05f,
+            prefs.factorX.coerceIn(0.5f, 4f)
         )
         sliderFactorY = LabeledSlider(
-            this, getString(R.string.factor_y_vertical), 0.50f, 10f, 0.05f, prefs.factorY
+            this, getString(R.string.factor_y_vertical), 0.50f, 4f, 0.05f,
+            prefs.factorY.coerceIn(0.5f, 4f)
         )
 
         sliderFactorX.onChange = { value, fromUser ->
@@ -479,7 +575,9 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
                 if (!prefs.runBackground && !prefs.onlyInSelectedApps) {
                     toast(getString(R.string.will_release_on_leave))
                 }
-                if (prefs.runBackground || prefs.onlyInSelectedApps) {
+                if (prefs.runBackground || prefs.onlyInSelectedApps ||
+                    prefs.mode == 1 || prefs.floatMenuEnabled || prefs.hudEnabled
+                ) {
                     requestNotificationPermissionIfNeeded()
                     startSensiService()
                 } else {
@@ -551,12 +649,33 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
         val margin = prefs.edgeMarginPct
         val soft = prefs.softRecenter
         val reanchor = prefs.reanchor
+        val mode = prefs.mode
+        val styleEnabled = prefs.styleEnabled
+        val styleId = prefs.styleId
+        val styleIntensity = prefs.styleIntensity
+        val styleK = prefs.styleStiffness
+        val styleC = prefs.styleDamping
+        val dragValue = prefs.dragValue
+        val dragShape = prefs.dragShape
+        val dragEasing = prefs.dragEasing
+        val dragDirection = prefs.dragDirection
+        val dragLref = prefs.dragLengthRef
+        val dragStop = prefs.dragStopOutside
+        val dragAmp = prefs.dragNoiseAmp
+        val dragPeriod = prefs.dragNoisePeriod
+        val dragVref = prefs.dragVelocityRef
         postEngineIo("engine enable") {
             ShizukuHelper.setRotation(rotation)
             ShizukuHelper.setEdgeMargin(margin)
             ShizukuHelper.setSoftRecenter(soft)
             ShizukuHelper.setReanchor(reanchor)
             ShizukuHelper.setFactor(fx, fy)
+            ShizukuHelper.setMode(mode)
+            ShizukuHelper.setStyle(styleId, styleEnabled, styleIntensity, styleK, styleC)
+            ShizukuHelper.setDragConfig(
+                dragValue, dragShape, dragEasing, dragDirection, dragLref,
+                dragStop, dragAmp, dragPeriod, dragVref
+            )
             ShizukuHelper.setEnabled(true)
             LogBuffer.info("MainActivity", "engine enable sent (rotation=$rotation)")
         }
@@ -720,6 +839,16 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
     // ------------------------------------------------------------------
     // Foreground service
     // ------------------------------------------------------------------
+
+    /** Asks the running service to re-read mode/zone (circle appears/disappears). */
+    private fun refreshSensiService() {
+        if (!prefs.enabled && !prefs.onlyInSelectedApps && !prefs.runBackground) return
+        try {
+            startService(Intent(this, SensiService::class.java).setAction(Actions.REFRESH_CONFIG))
+        } catch (t: Throwable) {
+            LogBuffer.error("MainActivity", "refreshSensiService failed", t)
+        }
+    }
 
     private fun startSensiService() {
         try {
@@ -1088,6 +1217,7 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
         super.onResume()
         updateModeUi()
         updateOverlayUi()
+        btnMode.text = modeText(prefs.mode)
         if ((prefs.hudEnabled || prefs.floatMenuEnabled) && OverlayUi.canDraw(this)) {
             startSensiService()
         }

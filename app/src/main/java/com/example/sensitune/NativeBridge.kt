@@ -8,6 +8,26 @@ package com.example.sensitune
  */
 object NativeBridge {
 
+    @Volatile
+    private var previewLoaded = false
+
+    /**
+     * Loads the engine in the app process ONLY for the pure preview functions
+     * (CurvePreview/TestPad). Never calls start(), so no grab can happen here.
+     */
+    @Synchronized
+    fun ensurePreviewLoaded(): Boolean {
+        if (previewLoaded) return true
+        return try {
+            System.loadLibrary("sensi_engine")
+            previewLoaded = true
+            true
+        } catch (t: Throwable) {
+            LogBuffer.warn("NativeBridge", "preview library unavailable: ${t.message}")
+            false
+        }
+    }
+
     @JvmStatic external fun start(): Int
     @JvmStatic external fun stop(reason: String): Int
     @JvmStatic external fun setEnabled(enabled: Boolean): Int
@@ -17,8 +37,56 @@ object NativeBridge {
     @JvmStatic external fun setEdgeMargin(percent: Int): Int
     @JvmStatic external fun setSoftRecenter(enabled: Boolean): Int
     @JvmStatic external fun setReanchor(enabled: Boolean): Int
+    @JvmStatic external fun setMode(mode: Int): Int
+    @JvmStatic external fun setStyle(
+        style: Int,
+        enabled: Boolean,
+        intensity: Int,
+        stiffness: Float,
+        damping: Float
+    ): Int
+    @JvmStatic external fun setDragConfig(
+        valuePct: Int,
+        shape: Int,
+        easing: Int,
+        direction: Int,
+        lengthRefPx: Int,
+        stopOutside: Boolean,
+        noiseAmpPct: Int,
+        noisePeriodPx: Int,
+        velocityRefPxMs: Float
+    ): Int
+    @JvmStatic external fun setDragZone(
+        cx: Int,
+        cy: Int,
+        radius: Int,
+        screenW: Int,
+        screenH: Int,
+        rotation: Int
+    ): Int
     @JvmStatic external fun heartbeat(): Int
     @JvmStatic external fun emergencyRelease(reason: String): Int
+    /** TestPad only: one frame through the real STYLE code (thread-local state). */
+    @JvmStatic external fun previewReset()
+    @JvmStatic external fun previewStyle(
+        style: Int,
+        intensity: Int,
+        stiffness: Float,
+        damping: Float,
+        dx: Float,
+        dy: Float,
+        dtMs: Float
+    ): FloatArray?
+
+    /** Pure preview of extra(u) for the drag curve; no engine state touched. */
+    @JvmStatic external fun dragPreviewExtra(
+        shape: Int,
+        easing: Int,
+        noiseAmp: Float,
+        noisePeriod: Float,
+        u: Float
+    ): Float
+
     @JvmStatic external fun getStatus(): String
     @JvmStatic external fun getLogs(sinceSeq: Int): String
     @JvmStatic external fun diagnose(): String

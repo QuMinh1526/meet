@@ -191,6 +191,88 @@ class SensiUserService(private val context: Context) : ISensiService.Stub() {
         }
     }
 
+    override fun setMode(mode: Int) {
+        synchronized(lock) {
+            if (!ensureLib()) return
+            try {
+                val code = NativeBridge.setMode(mode)
+                if (code != NativeBridge.OK) {
+                    LogBuffer.warn(TAG, "setMode($mode) rejected: ${NativeBridge.errorMessage(code)}")
+                }
+            } catch (t: Throwable) {
+                LogBuffer.error(TAG, "setMode exception", t)
+            }
+        }
+    }
+
+    override fun setStyle(
+        style: Int,
+        enabled: Boolean,
+        intensity: Int,
+        stiffness: Float,
+        damping: Float
+    ) {
+        synchronized(lock) {
+            if (!ensureLib()) return
+            try {
+                val code = NativeBridge.setStyle(style, enabled, intensity, stiffness, damping)
+                if (code != NativeBridge.OK) {
+                    LogBuffer.warn(TAG, "setStyle($style) rejected: ${NativeBridge.errorMessage(code)}")
+                }
+            } catch (t: Throwable) {
+                LogBuffer.error(TAG, "setStyle exception", t)
+            }
+        }
+    }
+
+    override fun setDragConfig(
+        valuePct: Int,
+        shape: Int,
+        easing: Int,
+        direction: Int,
+        lengthRefPx: Int,
+        stopOutside: Boolean,
+        noiseAmpPct: Int,
+        noisePeriodPx: Int,
+        velocityRefPxMs: Float
+    ) {
+        synchronized(lock) {
+            if (!ensureLib()) return
+            try {
+                val code = NativeBridge.setDragConfig(
+                    valuePct, shape, easing, direction, lengthRefPx, stopOutside,
+                    noiseAmpPct, noisePeriodPx, velocityRefPxMs
+                )
+                if (code != NativeBridge.OK) {
+                    LogBuffer.warn(TAG, "setDragConfig rejected: ${NativeBridge.errorMessage(code)}")
+                }
+            } catch (t: Throwable) {
+                LogBuffer.error(TAG, "setDragConfig exception", t)
+            }
+        }
+    }
+
+    override fun setDragZone(
+        cx: Int,
+        cy: Int,
+        radius: Int,
+        screenW: Int,
+        screenH: Int,
+        rotation: Int
+    ) {
+        synchronized(lock) {
+            if (!ensureLib()) return
+            try {
+                val code = NativeBridge.setDragZone(cx, cy, radius, screenW, screenH, rotation)
+                if (code != NativeBridge.OK) {
+                    LogBuffer.warn(TAG, "setDragZone rejected: ${NativeBridge.errorMessage(code)}")
+                }
+            } catch (t: Throwable) {
+                LogBuffer.error(TAG, "setDragZone exception", t)
+            }
+        }
+    }
+
     override fun heartbeat() {
         if (!libLoaded) return
         try {

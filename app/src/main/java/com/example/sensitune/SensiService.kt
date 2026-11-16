@@ -48,6 +48,12 @@ class SensiService : Service(), ShizukuHelper.Listener {
     @Volatile
     private var clock: ClockHud? = null
     private var menu: FloatMenu? = null
+
+    @Volatile
+    private var dragZone: DragZoneView? = null
+
+    @Volatile
+    private var dragUnlocked = false
     private var perfThread: HandlerThread? = null
 
     @Volatile
@@ -206,17 +212,80 @@ class SensiService : Service(), ShizukuHelper.Listener {
         postIo("setRotation($rotation)") { ShizukuHelper.setRotation(rotation) }
     }
 
-    /** Rotation first, then all engine settings, then (optionally) enable. */
+    private fun currentMode(): Int =
+        if (prefs.onlyInSelectedApps) prefs.modeFor(currentTarget) else prefs.mode
+
+    /** Rotation + every touch parameter, then optionally enable. */
     private fun pushEngineConfig(reason: String, enableAfter: Boolean, fx: Float, fy: Float) {
         val rotation = currentRotation()
+        val mode = currentMode()
+        val styleEnabled = prefs.styleEnabled
+        val styleId = prefs.styleId
+        val styleIntensity = prefs.styleIntensity
+        val styleK = prefs.styleStiffness
+        val styleC = prefs.styleDamping
+        val dragValue = prefs.dragValue
+        val dragShape = prefs.dragShape
+        val dragEasing = prefs.dragEasing
+        val dragDirection = prefs.dragDirection
+        val dragLref = prefs.dragLengthRef
+        val dragStop = prefs.dragStopOutside
+        val dragAmp = prefs.dragNoiseAmp
+        val dragPeriod = prefs.dragNoisePeriod
+        val dragVref = prefs.dragVelocityRef
         postIo("engine config ($reason)") {
             ShizukuHelper.setRotation(rotation)
             ShizukuHelper.setEdgeMargin(prefs.edgeMarginPct)
             ShizukuHelper.setSoftRecenter(prefs.softRecenter)
             ShizukuHelper.setReanchor(prefs.reanchor)
             ShizukuHelper.setFactor(fx, fy)
+            ShizukuHelper.setMode(mode)
+            ShizukuHelper.setStyle(styleId, styleEnabled, styleIntensity, styleK, styleC)
+            ShizukuHelper.setDragConfig(
+                dragValue, dragShape, dragEasing, dragDirection, dragLref,
+                dragStop, dragAmp, dragPeriod, dragVref
+            )
+            dragZone?.let { zone ->
+                if (mode == MODE_DRAG) zone.sendToEngine() else zone.sendInvalidZone()
+            }
             if (enableAfter) ShizukuHelper.setEnabled(true)
         }
+    }
+
+    private val touchConfigTask = Runnable { sendTouchConfigNow() }
+    private val zoneTask = Runnable { sendDragZoneNow() }
+
+    /** Latest wins with a ~50 ms debounce, off the main thread. */
+    private fun pushModeStyleDrag() {
+        val h = ensureIo() ?: return
+        h.removeCallbacks(touchConfigTask)
+        h.postDelayed(touchConfigTask, 50L)
+    }
+
+    private fun sendTouchConfigNow() {
+        val mode = currentMode()
+        ShizukuHelper.setMode(mode)
+        ShizukuHelper.setStyle(
+            prefs.styleId, prefs.styleEnabled, prefs.styleIntensity,
+            prefs.styleStiffness, prefs.styleDamping
+        )
+        ShizukuHelper.setDragConfig(
+            prefs.dragValue, prefs.dragShape, prefs.dragEasing,
+            prefs.dragDirection, prefs.dragLengthRef, prefs.dragStopOutside,
+            prefs.dragNoiseAmp, prefs.dragNoisePeriod, prefs.dragVelocityRef
+        )
+    }
+
+    private fun pushDragZone() {
+        val h = ensureIo() ?: return
+        h.removeCallbacks(zoneTask)
+        h.postDelayed(zoneTask, 50L)
+    }
+
+    private fun sendDragZoneNow() {
+        val zone = dragZone
+        if (zone != null && currentMode() == MODE_DRAG) zone.sendToEngine()
+        else zone?.sendInvalidZone()
     }
 
     /** Latest value wins; ~50 ms debounce; the final value is sent on finger up. */
@@ -233,13 +302,19 @@ class SensiService : Service(), ShizukuHelper.Listener {
 
     private fun setPanelOpen(open: Boolean) {
         panelOpen = open
+        updateSuspend()
+    }
+
+    /** Scaling stays suspended while the panel is open or the drag circle is unlocked. */
+    private fun updateSuspend() {
         val h = ensureIo() ?: return
         h.removeCallbacks(suspendRenewRunnable)
-        if (open) {
-            LogBuffer.info(TAG, "floating panel open -> scaling suspended (grab stays active)")
+        val want = panelOpen || dragUnlocked
+        if (want) {
+            LogBuffer.info(TAG, "scaling suspended (panel=$panelOpen dragUnlocked=$dragUnlocked)")
             h.post(suspendRenewRunnable)
         } else {
-            LogBuffer.info(TAG, "floating panel closed -> scaling resumed")
+            LogBuffer.info(TAG, "scaling resumed")
             h.post { ShizukuHelper.setScalingSuspended(false) }
         }
     }
@@ -255,6 +330,14 @@ class SensiService : Service(), ShizukuHelper.Listener {
             Actions.STOP_SERVICE -> {
                 releaseAll("stop service action")
                 stopSelf()
+                return START_NOT_STICKY
+            }
+            Actions.REFRESH_CONFIG -> {
+                startForegroundCompat()
+                ShizukuHelper.ensureBound()
+                syncOverlays()
+                pushModeStyleDrag()
+                pushDragZone()
                 return START_NOT_STICKY
             }
             else -> Unit
@@ -391,8 +474,9 @@ class SensiService : Service(), ShizukuHelper.Listener {
             )
             if (isTarget) {
                 val override = prefs.perAppFactor(pkg!!)
-                val fx = override?.first ?: prefs.factorX
-                val fy = override?.second ?: prefs.factorY
+                handler.post { syncDragZone() }
+                val fx = (override?.first ?: prefs.factorX).coerceIn(0.5f, 4.0f)
+                val fy = (override?.second ?: prefs.factorY).coerceIn(0.5f, 4.0f)
                 LogBuffer.info(
                     TAG,
                     "entering target $pkg: applying X=$fx Y=$fy " +
@@ -416,12 +500,17 @@ class SensiService : Service(), ShizukuHelper.Listener {
         }
     }
 
-    private fun applyGlobalFactorAndEnable(reason: String) {
+    private fun applyGlobalFactorAndEnable(
+        reason: String,
+        fx: Float = prefs.factorX,
+        fy: Float = prefs.factorY
+    ) {
         try {
-            LogBuffer.info(TAG, "enabling engine: $reason (X=${prefs.factorX}, Y=${prefs.factorY})")
-            pushEngineConfig(reason, true, prefs.factorX, prefs.factorY)
+            LogBuffer.info(TAG, "enabling engine: $reason (X=$fx, Y=$fy)")
+            pushEngineConfig(reason, true, fx, fy)
             engineOn = true
             hud?.setEngineActive(true)
+            handler.post { syncDragZone() }
             updateNotification(getString(R.string.notif_running_text))
         } catch (t: Throwable) {
             LogBuffer.error(TAG, "enable failed", t)
@@ -435,11 +524,13 @@ class SensiService : Service(), ShizukuHelper.Listener {
             watcher?.stop()
             watcher = null
             panelOpen = false
+            dragUnlocked = false
             ioHandler?.removeCallbacks(suspendRenewRunnable)
             postIo("clear scaling suspension") { ShizukuHelper.setScalingSuspended(false) }
             ShizukuHelper.emergencyRelease(reason)
             engineOn = false
             hud?.setEngineActive(false)
+            handler.post { syncDragZone() }
         } catch (t: Throwable) {
             LogBuffer.error(TAG, "releaseAll failed", t)
         }
@@ -450,9 +541,71 @@ class SensiService : Service(), ShizukuHelper.Listener {
     // ------------------------------------------------------------------
 
     private fun overlaysWanted(): Boolean =
-        prefs.hudEnabled || prefs.clockHudEnabled || prefs.floatMenuEnabled
+        prefs.hudEnabled || prefs.clockHudEnabled || prefs.floatMenuEnabled ||
+            (prefs.enabled && currentMode() == MODE_DRAG)
+
+    private val dragCallbacks = object : DragZoneView.Callbacks {
+        override fun onZoneChanged() {
+            pushDragZone()
+        }
+
+        override fun onUnlocked() {
+            dragUnlocked = true
+            updateSuspend()
+        }
+
+        override fun onLocked() {
+            dragUnlocked = false
+            updateSuspend()
+            pushDragZone()
+        }
+    }
 
     private val menuCallbacks = object : FloatMenu.Callbacks {
+        override fun onModeChanged(mode: Int) {
+            prefs.mode = mode
+            if (prefs.onlyInSelectedApps) prefs.setModeFor(currentTarget, mode)
+            LogBuffer.info(TAG, "mode changed from menu -> $mode")
+            handler.post { syncDragZone() }
+            pushModeStyleDrag()
+            pushDragZone()
+        }
+
+        override fun onStyleChanged() {
+            pushModeStyleDrag()
+        }
+
+        override fun onDragConfigChanged() {
+            handler.post { syncDragZone() }
+            pushModeStyleDrag()
+            pushDragZone()
+        }
+
+        override fun onDragZoneChanged() {
+            pushDragZone()
+        }
+
+        override fun onEngineToggle(enable: Boolean) {
+            prefs.enabled = enable
+            if (enable) {
+                if (prefs.onlyInSelectedApps && currentTarget == null) {
+                    startWatcher()
+                } else {
+                    val pkg = currentTarget
+                    val override = pkg?.let { prefs.perAppFactor(it) }
+                    applyGlobalFactorAndEnable(
+                        "floating menu switch",
+                        (override?.first ?: prefs.factorX).coerceIn(0.5f, 4.0f),
+                        (override?.second ?: prefs.factorY).coerceIn(0.5f, 4.0f)
+                    )
+                }
+                startHeartbeat()
+            } else {
+                releaseAll("floating menu switch")
+                updateNotification(getString(R.string.notif_released))
+            }
+        }
+
         override fun onFactorPreview(x: Float, y: Float) {
             queueFactor(x, y, immediate = false)
         }
@@ -552,10 +705,40 @@ class SensiService : Service(), ShizukuHelper.Listener {
                 clock?.hide()
                 clock = null
             }
+
+            syncDragZone()
         } catch (t: Throwable) {
             LogBuffer.error(TAG, "syncOverlays failed", t)
         }
     }
+
+    private fun syncDragZone() {
+        try {
+            val want = currentMode() == MODE_DRAG && OverlayUi.canDraw(this) &&
+                (prefs.enabled || testingOrOverlays())
+            if (want) {
+                if (dragZone == null) {
+                    dragZone = DragZoneView(applicationContext, prefs, dragCallbacks)
+                }
+                dragZone?.show()
+                dragZone?.refresh()
+            } else {
+                val old = dragZone
+                if (old != null) {
+                    postIo("invalidate drag zone") { old.sendInvalidZone() }
+                    old.hide()
+                }
+                dragZone = null
+                dragUnlocked = false
+                updateSuspend()
+            }
+        } catch (t: Throwable) {
+            LogBuffer.error(TAG, "syncDragZone failed", t)
+        }
+    }
+
+    private fun testingOrOverlays(): Boolean =
+        prefs.hudEnabled || prefs.clockHudEnabled || prefs.floatMenuEnabled
 
     private fun destroyOverlays() {
         stopPerfLoop()
@@ -577,6 +760,13 @@ class SensiService : Service(), ShizukuHelper.Listener {
             LogBuffer.error(TAG, "menu hide failed", t)
         }
         menu = null
+        try {
+            dragZone?.hide()
+        } catch (t: Throwable) {
+            LogBuffer.error(TAG, "drag zone hide failed", t)
+        }
+        dragZone = null
+        dragUnlocked = false
         lastPerfCsv = ""
         lastPerfPkg = null
     }
@@ -696,6 +886,8 @@ class SensiService : Service(), ShizukuHelper.Listener {
             hud?.onConfigurationChanged()
             clock?.onConfigurationChanged()
             menu?.onConfigurationChanged()
+            dragZone?.onConfigurationChanged()
+            if (dragZone != null) pushDragZone()
         } catch (t: Throwable) {
             LogBuffer.error(TAG, "overlay rotation handling failed", t)
         }
@@ -784,6 +976,8 @@ class SensiService : Service(), ShizukuHelper.Listener {
         private const val PERF_INTERVAL_MS = 1000L
         private const val FACTOR_DEBOUNCE_MS = 50L
         private const val SUSPEND_RENEW_MS = 2000L
+        const val MODE_SENSITIVITY = 0
+        const val MODE_DRAG = 1
 
         /** Foreground package seen by the watcher, exposed for the debug screen. */
         @Volatile

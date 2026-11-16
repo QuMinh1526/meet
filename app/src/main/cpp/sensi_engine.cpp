@@ -15,6 +15,7 @@
  */
 
 #include "sensi_engine.h"
+#include "sensi_dsp.h"
 #include "sensi_abs.h"
 #include "sensi_json.h"
 
@@ -32,6 +33,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <fstream>
+#include <memory>
 #include <linux/input.h>
 #include <linux/uinput.h>
 #include <mutex>
@@ -184,6 +186,46 @@ static std::atomic<uint64_t> g_eagain{0};
 static std::atomic<uint64_t> g_latency_sum_us{0};
 static std::atomic<uint64_t> g_latency_max_us{0};
 static std::atomic<uint64_t> g_events_per_sec{0};
+
+/*
+ * RCU-style configuration: the active config is an immutable shared pointer
+ * swapped with an atomic store. The reader loop loads it without any lock and a
+ * finger keeps the snapshot it pinned on touch down, so changing mode/style/drag
+ * never affects a finger already down.
+ */
+static std::shared_ptr<const sensitune::EngineConfig> g_config;
+static std::mutex g_cfg_mutex;
+
+static std::shared_ptr<const sensitune::EngineConfig> load_config() {
+    auto cfg = std::atomic_load_explicit(&g_config, std::memory_order_acquire);
+    if (!cfg) {
+        static const std::shared_ptr<const sensitune::EngineConfig> kDefault =
+                std::make_shared<const sensitune::EngineConfig>();
+        cfg = kDefault;
+    }
+    return cfg;
+}
+
+template <typename F>
+static void update_config(F mutate) {
+    std::lock_guard<std::mutex> lock(g_cfg_mutex);
+    sensitune::EngineConfig cfg = *load_config();
+    mutate(cfg);
+    std::atomic_store_explicit(
+            &g_config,
+            std::make_shared<const sensitune::EngineConfig>(cfg),
+            std::memory_order_release);
+}
+
+static std::atomic<uint64_t> g_frames_scaled{0};
+static std::atomic<uint64_t> g_style_frames{0};
+static std::atomic<uint64_t> g_style_lat_sum_us{0};
+static std::atomic<uint64_t> g_style_lat_max_us{0};
+static std::atomic<uint64_t> g_style_proc_sum_us{0};
+static std::atomic<uint64_t> g_style_proc_max_us{0};
+static std::atomic<uint64_t> g_drag_gain_max_milli{0};
+static std::atomic<uint64_t> g_drag_frames{0};
+static std::atomic<uint64_t> g_zone_updates{0};
 
 static std::mutex g_op_mutex;       // start/stop serialization
 static std::mutex g_release_mutex;  // emergency release serialization
@@ -1158,6 +1200,30 @@ struct SlotState {
     bool suspended = false;
     int synth_tracking_id = 0;
     int64_t last_reanchor_ms = 0;
+
+    // Configuration pinned on touch down (immutable RCU snapshot).
+    std::shared_ptr<const sensitune::EngineConfig> cfg;
+    sensitune::StyleRuntime style;
+
+    // Screen-space tracking for the shared pipeline.
+    bool have_screen = false;
+    float last_sx = 0.0f;
+    float last_sy = 0.0f;
+    int64_t last_ts_us = 0;
+
+    // Drag mode state (path length and smoothed speed, both in screen px).
+    bool drag_decided = false;
+    bool drag_inside = false;
+    float drag_L = 0.0f;
+    float drag_speed = 0.0f;
+
+    // Position events of the current packet, rewritten at SYN_REPORT.
+    int pend_x_ev = -1;
+    int pend_y_ev = -1;
+    int pend_raw_x = 0;
+    int pend_raw_y = 0;
+    bool has_px = false;
+    bool has_py = false;
 };
 
 static SlotState g_slots[MAX_SLOTS];
@@ -1204,40 +1270,71 @@ static void record_axis_stats(std::atomic<uint64_t> &sum, std::atomic<uint64_t> 
 static void pin_slot_config(SlotState &s) {
     int rot = g_rotation.load(std::memory_order_relaxed);
     bool suspended = g_scaling_suspended.load(std::memory_order_relaxed);
-    float fx = g_kx.load(std::memory_order_relaxed);
-    float fy = g_ky.load(std::memory_order_relaxed);
+    float fx = std::fmin(g_kx.load(std::memory_order_relaxed), sensitune::MAX_TOTAL_GAIN);
+    float fy = std::fmin(g_ky.load(std::memory_order_relaxed), sensitune::MAX_TOTAL_GAIN);
     if (suspended) {
         fx = 1.0f;
         fy = 1.0f;
     }
-    bool landscape = (rot == 1 || rot == 3);
-    s.k_raw_x = landscape ? fy : fx;
-    s.k_raw_y = landscape ? fx : fy;
+    /* Screen space: X always means horizontal movement of the display. */
+    s.k_raw_x = fx;
+    s.k_raw_y = fy;
     s.suspended = suspended;
     s.soft = !suspended && g_soft_recenter.load(std::memory_order_relaxed);
     s.synth_tracking_id = 0;
+    auto snapshot = *load_config();
+    if (snapshot.zone.valid) snapshot.zone.rotation = rot;
+    s.cfg = std::make_shared<const sensitune::EngineConfig>(snapshot);
+    sensitune::style_reset(s.style);
+    s.drag_decided = false;
+    s.drag_inside = false;
+    s.drag_L = 0.0f;
+    s.drag_speed = 0.0f;
+    s.have_screen = false;
+    s.last_ts_us = 0;
+    s.pend_x_ev = -1;
+    s.pend_y_ev = -1;
+    s.has_px = false;
+    s.has_py = false;
+}
+
+/* Raw axis lengths -> screen size, with a sane fallback before any zone call. */
+static void screen_dims(const SlotState &s, int *sw, int *sh) {
+    int rw = g_abs_max_x - g_abs_min_x + 1;
+    int rh = g_abs_max_y - g_abs_min_y + 1;
+    const auto &zc = s.cfg->zone;
+    if (zc.valid && zc.screenW > 0 && zc.screenH > 0) {
+        *sw = zc.screenW;
+        *sh = zc.screenH;
+        return;
+    }
+    int rot = zc.valid ? zc.rotation
+                       : g_rotation.load(std::memory_order_relaxed);
+    if (rot == 1 || rot == 3) {
+        *sw = rh;
+        *sh = rw;
+    } else {
+        *sw = rw;
+        *sh = rh;
+    }
+}
+
+static void raw_to_screen_pt(const SlotState &s, float rx, float ry, float *sx, float *sy) {
+    int sw = 0, sh = 0;
+    screen_dims(s, &sw, &sh);
+    int rot = s.cfg->zone.valid ? s.cfg->zone.rotation
+                                : g_rotation.load(std::memory_order_relaxed);
+    sensitune::raw_to_screen(rot, rx, ry, g_abs_max_x - g_abs_min_x + 1,
+                             g_abs_max_y - g_abs_min_y + 1, sw, sh, sx, sy);
 }
 
 /*
- * One raw axis step. virt is kept as a float (sub-pixel); it is rounded only when
- * written out. When the virtual position enters the edge buffer AND the offset
- * pushes it towards that edge, the offset is faded linearly to zero so virt
- * rejoins raw at the edge instead of sticking there while the finger keeps
- * moving. Away from the edge the offset accumulates normally again.
+ * Soft recenter + hard clamp in RAW units. The offset is faded linearly to 0
+ * inside the edge buffer, so virt rejoins raw at the edge instead of sticking
+ * there while the finger keeps moving.
  */
-static bool scale_axis(SlotState &s, bool is_x, int raw, float *virt, int lo, int hi,
-                       bool *pending, int *last_raw) {
-    if (*pending) {
-        *virt = (float) clamp_int(raw, lo, hi);
-        *pending = false;
-        *last_raw = raw;
-        return false;
-    }
-
-    float k = is_x ? s.k_raw_x : s.k_raw_y;
-    *virt += (float) (raw - *last_raw) * k;
-    *last_raw = raw;
-
+static bool soften_and_clamp(SlotState &s, bool is_x, int raw, float *virt,
+                             int lo, int hi) {
     if (s.soft && !s.suspended) {
         float m = axis_margin(lo, hi);
         if (m > 0.0f) {
@@ -1251,7 +1348,6 @@ static bool scale_axis(SlotState &s, bool is_x, int raw, float *virt, int lo, in
             }
         }
     }
-
     bool clamped = false;
     if (*virt < (float) lo) {
         *virt = (float) lo;
@@ -1260,7 +1356,280 @@ static bool scale_axis(SlotState &s, bool is_x, int raw, float *virt, int lo, in
         *virt = (float) hi;
         clamped = true;
     }
+    (void) is_x;
     return clamped;
+}
+
+static void build_reanchor_events(std::vector<struct input_event> *out, int slot,
+                                  int safe_x, int safe_y);
+
+/*
+ * Shared pipeline, once per SYN_REPORT and per finger:
+ *   raw delta -> screen delta -> STYLE -> MODE gain -> soft recenter/clamp -> write
+ * A zero finger delta produces a zero output delta (style included).
+ */
+static void process_slot_frame(int slot, std::vector<struct input_event> *packet,
+                               std::vector<struct input_event> *extra,
+                               int64_t ts_us) {
+    if (slot < 0 || slot >= MAX_SLOTS) return;
+    SlotState &s = g_slots[slot];
+    if (!s.active) return;
+    if (!s.has_px && !s.has_py) return;
+
+    int rx = s.has_px ? s.pend_raw_x : s.last_raw_x;
+    int ry = s.has_py ? s.pend_raw_y : s.last_raw_y;
+
+    /* Only consume an axis that actually arrived; a missing axis waits for its
+     * own event instead of being initialised from a stale 0. */
+    if (s.pending_init_x && s.has_px) {
+        s.virt_x = (float) clamp_int(rx, g_abs_min_x, g_abs_max_x);
+        s.last_raw_x = rx;
+        s.pending_init_x = false;
+    }
+    if (s.pending_init_y && s.has_py) {
+        s.virt_y = (float) clamp_int(ry, g_abs_min_y, g_abs_max_y);
+        s.last_raw_y = ry;
+        s.pending_init_y = false;
+    }
+    if (s.pending_init_x || s.pending_init_y) {
+        if (s.has_px && s.pend_x_ev >= 0 &&
+            s.pend_x_ev < (int) packet->size()) {
+            (*packet)[s.pend_x_ev].value = (int) lroundf(s.virt_x);
+        }
+        if (s.has_py && s.pend_y_ev >= 0 &&
+            s.pend_y_ev < (int) packet->size()) {
+            (*packet)[s.pend_y_ev].value = (int) lroundf(s.virt_y);
+        }
+        s.has_px = false;
+        s.has_py = false;
+        s.pend_x_ev = -1;
+        s.pend_y_ev = -1;
+        return;
+    }
+
+    float sx = 0.0f, sy = 0.0f;
+    raw_to_screen_pt(s, (float) s.last_raw_x, (float) s.last_raw_y, &sx, &sy);
+    if (!s.have_screen) {
+        s.have_screen = true;
+        s.last_sx = sx;
+        s.last_sy = sy;
+        s.last_ts_us = ts_us;
+        if (s.has_px && s.pend_x_ev >= 0 &&
+            s.pend_x_ev < (int) packet->size()) {
+            (*packet)[s.pend_x_ev].value = (int) lroundf(s.virt_x);
+        }
+        if (s.has_py && s.pend_y_ev >= 0 &&
+            s.pend_y_ev < (int) packet->size()) {
+            (*packet)[s.pend_y_ev].value = (int) lroundf(s.virt_y);
+        }
+        s.has_px = false;
+        s.has_py = false;
+        s.pend_x_ev = -1;
+        s.pend_y_ev = -1;
+        return;
+    }
+
+    float sx_now = 0.0f, sy_now = 0.0f;
+    raw_to_screen_pt(s, (float) rx, (float) ry, &sx_now, &sy_now);
+    float dsx = sx_now - s.last_sx;
+    float dsy = sy_now - s.last_sy;
+    if (s.has_px == false) dsx = 0.0f;
+    if (s.has_py == false) dsy = 0.0f;
+
+    int64_t dt_us = ts_us - s.last_ts_us;
+    if (dt_us <= 0 || dt_us > 250000) dt_us = 16000;
+    float dt_s = (float) dt_us / 1000000.0f;
+
+    /* Strict rule: a real finger delta of 0 must produce an output delta of 0.
+     * Soft-recenter is skipped too, so a stationary finger cannot drift. */
+    if (dsx == 0.0f && dsy == 0.0f) {
+        if (s.has_px && s.pend_x_ev >= 0 &&
+            s.pend_x_ev < (int) packet->size()) {
+            (*packet)[s.pend_x_ev].value = (int) lroundf(s.virt_x);
+        }
+        if (s.has_py && s.pend_y_ev >= 0 &&
+            s.pend_y_ev < (int) packet->size()) {
+            (*packet)[s.pend_y_ev].value = (int) lroundf(s.virt_y);
+        }
+        s.last_raw_x = rx;
+        s.last_raw_y = ry;
+        s.last_sx = sx_now;
+        s.last_sy = sy_now;
+        s.last_ts_us = ts_us;
+        s.has_px = false;
+        s.has_py = false;
+        s.pend_x_ev = -1;
+        s.pend_y_ev = -1;
+        return;
+    }
+
+    const sensitune::EngineConfig &cfg = *s.cfg;
+    /* Suspended (panel open / circle unlocked) = exact pass-through, no STYLE. */
+    bool transformed = !s.suspended;
+
+    if (cfg.mode == sensitune::MODE_DRAG &&
+        (!cfg.zone.valid || cfg.zone.radius <= 0)) {
+        /* No valid circle yet: required full pass-through. */
+        transformed = false;
+    }
+
+    if (transformed && cfg.mode == sensitune::MODE_DRAG && cfg.zone.valid &&
+        cfg.zone.radius > 0) {
+        if (!s.drag_decided) {
+            s.drag_decided = true;
+            float cx = sx_now - (float) cfg.zone.cx;
+            float cy = sy_now - (float) cfg.zone.cy;
+            float r = (float) cfg.zone.radius;
+            s.drag_inside = (cx * cx + cy * cy) <= r * r;
+            s.drag_L = 0.0f;
+            s.drag_speed = 0.0f;
+        }
+        if (s.drag_inside && cfg.drag.stopOutside) {
+            float cx = sx_now - (float) cfg.zone.cx;
+            float cy = sy_now - (float) cfg.zone.cy;
+            float r = (float) cfg.zone.radius;
+            if (cx * cx + cy * cy > r * r) {
+                s.drag_inside = false;
+                LOGI("drag slot %d left the circle -> pass-through", slot);
+            }
+        }
+        transformed = s.drag_inside;
+    }
+
+    float dx = dsx, dy = dsy;
+    if (transformed) {
+        if (cfg.style.enabled) {
+            float ox = dsx, oy = dsy;
+            int64_t proc_start = now_us();
+            sensitune::style_process(cfg.style, dsx, dsy, dt_s, s.style, &ox, &oy);
+            uint64_t proc_us = (uint64_t) std::max<int64_t>(0, now_us() - proc_start);
+            g_style_proc_sum_us.fetch_add(proc_us);
+            uint64_t proc_prev = g_style_proc_max_us.load();
+            while (proc_us > proc_prev &&
+                   !g_style_proc_max_us.compare_exchange_weak(proc_prev, proc_us)) {
+            }
+            dx = ox;
+            dy = oy;
+            g_style_frames.fetch_add(1);
+            uint64_t est = (uint64_t) sensitune::style_est_latency_us(cfg.style);
+            g_style_lat_sum_us.fetch_add(est);
+            uint64_t prev = g_style_lat_max_us.load();
+            while (est > prev &&
+                   !g_style_lat_max_us.compare_exchange_weak(prev, est)) {
+            }
+        }
+
+        if (cfg.mode == sensitune::MODE_DRAG) {
+            float mag = std::sqrt(dsx * dsx + dsy * dsy);
+            s.drag_L += mag;
+            float inst = mag / (dt_s * 1000.0f);
+            s.drag_speed = s.drag_speed <= 0.0f
+                           ? inst
+                           : (0.7f * s.drag_speed + 0.3f * inst);
+            float gain = sensitune::drag_gain(cfg.drag, s.drag_L, s.drag_speed);
+            if (!sensitune::direction_allows(cfg.drag.direction, dsx, dsy)) gain = 1.0f;
+            dx *= gain;
+            dy *= gain;
+            g_drag_frames.fetch_add(1);
+            uint64_t milli = (uint64_t) (gain * 1000.0f);
+            uint64_t prev = g_drag_gain_max_milli.load();
+            while (milli > prev &&
+                   !g_drag_gain_max_milli.compare_exchange_weak(prev, milli)) {
+            }
+        } else {
+            dx *= s.k_raw_x;
+            dy *= s.k_raw_y;
+        }
+    }
+
+    /* Hard cap on the whole chain (STYLE overshoot + mode gain) at 4.0x. */
+    {
+        float in_mag = std::sqrt(dsx * dsx + dsy * dsy);
+        float out_mag = std::sqrt(dx * dx + dy * dy);
+        if (out_mag > in_mag * sensitune::MAX_TOTAL_GAIN && out_mag > 0.0001f) {
+            float scale = in_mag * sensitune::MAX_TOTAL_GAIN / out_mag;
+            dx *= scale;
+            dy *= scale;
+        }
+    }
+
+    /* Back to raw units, then accumulate. Sub-pixel kept until written. */
+    int sw = 0, sh = 0;
+    screen_dims(s, &sw, &sh);
+    int rot = cfg.zone.valid ? cfg.zone.rotation
+                             : g_rotation.load(std::memory_order_relaxed);
+    float drx = 0.0f, dry = 0.0f;
+    sensitune::screen_delta_to_raw(rot, dx, dy, g_abs_max_x - g_abs_min_x + 1,
+                                  g_abs_max_y - g_abs_min_y + 1, sw, sh,
+                                  &drx, &dry);
+    if (!std::isfinite(drx) || !std::isfinite(dry)) {
+        drx = 0.0f;
+        dry = 0.0f;
+    }
+    s.virt_x += drx;
+    s.virt_y += dry;
+
+    /* Only touch an axis that actually delivered an event: an X-only frame
+     * must not silently move the Y offset near an edge. */
+    bool clamp_x = false, clamp_y = false;
+    if (s.has_px) {
+        clamp_x = soften_and_clamp(s, true, rx, &s.virt_x,
+                                   g_abs_min_x, g_abs_max_x);
+        record_axis_stats(g_offset_sum_x, g_offset_max_x, g_axis_events_x,
+                          s.virt_x - (float) rx);
+    }
+    if (s.has_py) {
+        clamp_y = soften_and_clamp(s, false, ry, &s.virt_y,
+                                   g_abs_min_y, g_abs_max_y);
+        record_axis_stats(g_offset_sum_y, g_offset_max_y, g_axis_events_y,
+                          s.virt_y - (float) ry);
+    }
+    if (clamp_x) g_clamp_x.fetch_add(1);
+    if (clamp_y) g_clamp_y.fetch_add(1);
+
+    bool reanchored = false;
+    if ((clamp_x || clamp_y) && g_reanchor.load(std::memory_order_relaxed) &&
+        !s.suspended) {
+        int64_t now = now_ms();
+        if (now - s.last_reanchor_ms >= 1000) {
+            s.last_reanchor_ms = now;
+            int safe_x = (g_abs_min_x + g_abs_max_x) / 2;
+            int safe_y = (g_abs_min_y + g_abs_max_y) / 2;
+            s.virt_x = (float) safe_x;
+            s.virt_y = (float) safe_y;
+            build_reanchor_events(extra, slot, safe_x, safe_y);
+            g_reanchor_count.fetch_add(1);
+            reanchored = true;
+            s.have_screen = false;
+            /* Keep following the finger delta from the centre instead of
+             * snapping back to the raw position on the next frame. */
+            s.pending_init_x = false;
+            s.pending_init_y = false;
+            s.last_raw_x = rx;
+            s.last_raw_y = ry;
+            LOGW("reanchor slot %d after edge clamp -> touch again at (%d,%d)",
+                 slot, safe_x, safe_y);
+        }
+    }
+
+    if (s.has_px && s.pend_x_ev >= 0 && s.pend_x_ev < (int) packet->size()) {
+        (*packet)[s.pend_x_ev].value = (int) lroundf(s.virt_x);
+    }
+    if (s.has_py && s.pend_y_ev >= 0 && s.pend_y_ev < (int) packet->size()) {
+        (*packet)[s.pend_y_ev].value = (int) lroundf(s.virt_y);
+    }
+
+    s.last_raw_x = rx;
+    s.last_raw_y = ry;
+    s.last_sx = sx_now;
+    s.last_sy = sy_now;
+    s.last_ts_us = ts_us;
+    s.has_px = false;
+    s.has_py = false;
+    s.pend_x_ev = -1;
+    s.pend_y_ev = -1;
+    (void) reanchored;
+    g_frames_scaled.fetch_add(1);
 }
 
 static void push_event(std::vector<struct input_event> *out, int type, int code, int value) {
@@ -1287,35 +1656,6 @@ static void build_reanchor_events(std::vector<struct input_event> *out, int slot
     push_event(out, EV_ABS, ABS_MT_POSITION_X, safe_x);
     push_event(out, EV_ABS, ABS_MT_POSITION_Y, safe_y);
     push_event(out, EV_SYN, SYN_REPORT, 0);
-}
-
-/*
- * Reanchors at most once per second per slot. The re-touch uses the safe centre
- * of the panel and is emitted before the current (dropped) position event.
- */
-static bool try_reanchor(SlotState &s, int slot, int raw_x,
-                         std::vector<struct input_event> *extra, bool is_x,
-                         float *virt_axis) {
-    (void) raw_x;
-    (void) is_x;
-    (void) virt_axis;
-    if (!g_reanchor.load(std::memory_order_relaxed) || s.suspended) return false;
-    int64_t now = now_ms();
-    if (now - s.last_reanchor_ms < 1000) return false;
-    s.last_reanchor_ms = now;
-
-    int safe_x = (g_abs_min_x + g_abs_max_x) / 2;
-    int safe_y = (g_abs_min_y + g_abs_max_y) / 2;
-    s.virt_x = (float) safe_x;
-    s.virt_y = (float) safe_y;
-    s.pending_init_x = false;
-    s.pending_init_y = false;
-    build_reanchor_events(extra, slot, safe_x, safe_y);
-    g_reanchor_count.fetch_add(1);
-    LOGW("reanchor slot %d after edge clamp -> touch again at (%d,%d); the game "
-         "may see this as a new touch",
-         slot, safe_x, safe_y);
-    return true;
 }
 
 static void reset_slot(int slot) {
@@ -1428,7 +1768,8 @@ static void flush_packet(const std::vector<struct input_event> &packet,
  * receives any synthetic events that have to be emitted first.
  */
 static bool handle_abs_event(struct input_event *ev,
-                             std::vector<struct input_event> *extra) {
+                             std::vector<struct input_event> *extra,
+                             std::vector<struct input_event> *packet) {
     int slot = g_current_slot;
     bool valid = slot >= 0 && slot < MAX_SLOTS;
 
@@ -1467,33 +1808,19 @@ static bool handle_abs_event(struct input_event *ev,
         case ABS_MT_POSITION_X: {
             if (!valid) return true;
             SlotState &s = g_slots[slot];
-            int raw = ev->value;
             if (!s.active) return true; // no active finger: forward unchanged
-            bool clamped = scale_axis(s, true, raw, &s.virt_x, g_abs_min_x,
-                                      g_abs_max_x, &s.pending_init_x, &s.last_raw_x);
-            record_axis_stats(g_offset_sum_x, g_offset_max_x, g_axis_events_x,
-                              s.virt_x - (float) raw);
-            if (clamped) {
-                g_clamp_x.fetch_add(1);
-                if (try_reanchor(s, slot, raw, extra, true, &s.virt_x)) return false;
-            }
-            ev->value = (int) lroundf(s.virt_x);
+            s.pend_raw_x = ev->value;
+            s.has_px = true;
+            s.pend_x_ev = (int) packet->size();
             return true;
         }
         case ABS_MT_POSITION_Y: {
             if (!valid) return true;
             SlotState &s = g_slots[slot];
-            int raw = ev->value;
             if (!s.active) return true;
-            bool clamped = scale_axis(s, false, raw, &s.virt_y, g_abs_min_y,
-                                      g_abs_max_y, &s.pending_init_y, &s.last_raw_y);
-            record_axis_stats(g_offset_sum_y, g_offset_max_y, g_axis_events_y,
-                              s.virt_y - (float) raw);
-            if (clamped) {
-                g_clamp_y.fetch_add(1);
-                if (try_reanchor(s, slot, raw, extra, false, &s.virt_y)) return false;
-            }
-            ev->value = (int) lroundf(s.virt_y);
+            s.pend_raw_y = ev->value;
+            s.has_py = true;
+            s.pend_y_ev = (int) packet->size();
             return true;
         }
         default:
@@ -1557,6 +1884,25 @@ static void reader_loop() {
                 struct input_event ev = read_buf[i];
 
                 if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
+                    /*
+                     * Scale once per frame, after both axes of every finger
+                     * arrived, so STYLE always sees a 2D delta and the mode gain
+                     * can use the real direction of the movement.
+                     */
+                    int64_t ts_us = (int64_t) ev.time.tv_sec * 1000000LL +
+                                    (int64_t) ev.time.tv_usec;
+                    if (ts_us <= 0) ts_us = read_ts;
+                    std::vector<struct input_event> reanchor_events;
+                    for (int slot_idx = 0; slot_idx < MAX_SLOTS; ++slot_idx) {
+                        SlotState &st = g_slots[slot_idx];
+                        if (st.active && (st.has_px || st.has_py)) {
+                            process_slot_frame(slot_idx, &packet, &reanchor_events,
+                                               ts_us);
+                        }
+                    }
+                    for (const auto &extra_ev : reanchor_events) {
+                        packet.push_back(extra_ev);
+                    }
                     struct input_event syn = ev;
                     packet.push_back(syn);
                     flush_packet(packet, read_ts);
@@ -1574,7 +1920,7 @@ static void reader_loop() {
                 std::vector<struct input_event> reanchor_events;
                 bool forward = true;
                 if (ev.type == EV_ABS) {
-                    forward = handle_abs_event(&ev, &reanchor_events);
+                    forward = handle_abs_event(&ev, &reanchor_events, &packet);
                     for (const auto &extra_ev : reanchor_events) {
                         packet.push_back(extra_ev);
                     }
@@ -1589,6 +1935,10 @@ static void reader_loop() {
                                 g_slots[s].active = false;
                                 g_slots[s].pending_init_x = true;
                                 g_slots[s].pending_init_y = true;
+                                g_slots[s].has_px = false;
+                                g_slots[s].has_py = false;
+                                g_slots[s].pend_x_ev = -1;
+                                g_slots[s].pend_y_ev = -1;
                             }
                         }
                     }
@@ -1895,6 +2245,14 @@ int sensi_start(void) {
     g_offset_max_y.store(0);
     g_axis_events_x.store(0);
     g_axis_events_y.store(0);
+    g_style_frames.store(0);
+    g_style_lat_sum_us.store(0);
+    g_style_lat_max_us.store(0);
+    g_style_proc_sum_us.store(0);
+    g_style_proc_max_us.store(0);
+    g_frames_scaled.store(0);
+    g_drag_frames.store(0);
+    g_drag_gain_max_milli.store(0);
 
     g_watchdog_thread = std::thread(watchdog_loop);
     g_key_thread = std::thread(key_loop);
@@ -1950,9 +2308,11 @@ int sensi_set_enabled(int enabled) {
 }
 
 int sensi_set_factor(float x, float y) {
-    if (!std::isfinite(x) || !std::isfinite(y) || x < 0.5f || x > 10.0f ||
-        y < 0.5f || y > 10.0f) {
-        LOGE("set_factor rejected: X=%.3f Y=%.3f (valid 0.5..10.0)", x, y);
+    /* Hard rule: total gain never exceeds 4.0x. */
+    if (!std::isfinite(x) || !std::isfinite(y) || x < 0.5f ||
+        x > sensitune::MAX_TOTAL_GAIN || y < 0.5f ||
+        y > sensitune::MAX_TOTAL_GAIN) {
+        LOGE("set_factor rejected: X=%.3f Y=%.3f (valid 0.5..4.0)", x, y);
         return SENSI_ERR_BAD_ARG;
     }
     g_kx.store(x);
@@ -2031,6 +2391,106 @@ int sensi_set_reanchor(int enabled) {
     return SENSI_OK;
 }
 
+int sensi_set_mode(int mode) {
+    if (mode != sensitune::MODE_SENSITIVITY && mode != sensitune::MODE_DRAG) {
+        LOGE("set_mode rejected: %d (valid 0..1)", mode);
+        return SENSI_ERR_BAD_ARG;
+    }
+    update_config([mode](sensitune::EngineConfig &c) { c.mode = mode; });
+    LOGI("mode -> %s (applies to the next new finger)",
+         mode == sensitune::MODE_DRAG ? "DRAG" : "SENSITIVITY");
+    return SENSI_OK;
+}
+
+int sensi_set_style(int style, int enabled, int intensity, float stiffness,
+                    float damping) {
+    if (style < 0 || style > sensitune::STYLE_STEPPED || intensity < 0 ||
+        intensity > 100 || !std::isfinite(stiffness) ||
+        !std::isfinite(damping) || stiffness < 40.0f || stiffness > 900.0f ||
+        damping < 2.0f || damping > 120.0f) {
+        LOGE("set_style rejected: id=%d on=%d intensity=%d k=%.1f c=%.1f",
+             style, enabled, intensity, stiffness, damping);
+        return SENSI_ERR_BAD_ARG;
+    }
+    update_config([&](sensitune::EngineConfig &c) {
+        c.style.id = style;
+        c.style.enabled = enabled != 0;
+        c.style.intensity = (float) intensity;
+        c.style.stiffness = stiffness;
+        c.style.damping = damping;
+    });
+    LOGI("style -> %d enabled=%d intensity=%d (k=%.0f c=%.0f); estimated added "
+         "latency %.0f us at this intensity",
+         style, enabled, intensity, stiffness, damping,
+         sensitune::style_est_latency_us(load_config()->style));
+    return SENSI_OK;
+}
+
+int sensi_set_drag_config(int value_pct, int shape, int easing, int direction,
+                          int length_ref_px, int stop_outside, int noise_amp_pct,
+                          int noise_period_px, float velocity_ref_px_ms) {
+    if (value_pct < 0 || value_pct > 100 || shape < 0 ||
+        shape > sensitune::SHAPE_VELOCITY || easing < 0 ||
+        easing > sensitune::EASE_IN_OUT || direction < 0 ||
+        direction > sensitune::DIR_DOWN || length_ref_px < 20 ||
+        length_ref_px > 2000 || noise_amp_pct < 0 || noise_amp_pct > 50 ||
+        noise_period_px < 20 || noise_period_px > 300 ||
+        !std::isfinite(velocity_ref_px_ms) || velocity_ref_px_ms < 0.1f ||
+        velocity_ref_px_ms > 20.0f) {
+        LOGE("set_drag_config rejected: value=%d shape=%d easing=%d dir=%d "
+             "Lref=%d stop=%d amp=%d period=%d vRef=%.2f",
+             value_pct, shape, easing, direction, length_ref_px, stop_outside,
+             noise_amp_pct, noise_period_px, velocity_ref_px_ms);
+        return SENSI_ERR_BAD_ARG;
+    }
+    update_config([&](sensitune::EngineConfig &c) {
+        c.drag.valuePct = value_pct;
+        c.drag.shape = shape;
+        c.drag.easing = easing;
+        c.drag.direction = direction;
+        c.drag.lengthRefPx = length_ref_px;
+        c.drag.stopOutside = stop_outside != 0;
+        c.drag.noiseAmp = (float) noise_amp_pct / 100.0f;
+        c.drag.noisePeriodPx = noise_period_px;
+        c.drag.velocityRefPxMs = velocity_ref_px_ms;
+    });
+    LOGI("drag config -> value=%d shape=%d easing=%d dir=%d Lref=%d stop=%d "
+         "amp=%.2f period=%d vRef=%.2f",
+         value_pct, shape, easing, direction, length_ref_px, stop_outside,
+         (double) ((float) noise_amp_pct / 100.0f), noise_period_px,
+         (double) velocity_ref_px_ms);
+    return SENSI_OK;
+}
+
+int sensi_set_drag_zone(int cx, int cy, int radius, int screen_w, int screen_h,
+                        int rotation) {
+    if (screen_w <= 0 || screen_h <= 0 || radius < 0 || rotation < 0 ||
+        rotation > 3) {
+        LOGE("set_drag_zone rejected: c=(%d,%d) r=%d screen=%dx%d rot=%d", cx, cy,
+             radius, screen_w, screen_h, rotation);
+        return SENSI_ERR_BAD_ARG;
+    }
+    bool valid = radius > 0;
+    if (valid) {
+        cx = clamp_int(cx, 0, screen_w);
+        cy = clamp_int(cy, 0, screen_h);
+        radius = clamp_int(radius, 8, std::min(screen_w, screen_h) / 2);
+    }
+    update_config([&](sensitune::EngineConfig &c) {
+        c.zone.valid = valid;
+        c.zone.cx = cx;
+        c.zone.cy = cy;
+        c.zone.radius = radius;
+        c.zone.screenW = screen_w;
+        c.zone.screenH = screen_h;
+        c.zone.rotation = rotation;
+    });
+    g_zone_updates.fetch_add(1);
+    LOGI("drag zone -> valid=%d center=(%d,%d) r=%d screen=%dx%d rotation=%d",
+         valid ? 1 : 0, cx, cy, radius, screen_w, screen_h, rotation);
+    return SENSI_OK;
+}
+
 int sensi_heartbeat(void) {
     g_last_heartbeat_ms.store(now_ms());
     return SENSI_OK;
@@ -2050,7 +2510,11 @@ static const char *state_name(int s) {
 }
 
 char *sensi_get_status_json(void) {
-    char buf[4096];
+    char buf[7168];
+    const auto cfg_ptr = load_config();
+    const sensitune::EngineConfig &cfg = *cfg_ptr;
+    uint64_t style_frames = g_style_frames.load();
+    uint64_t style_lat_avg = style_frames ? g_style_lat_sum_us.load() / style_frames : 0;
     std::string err;
     {
         std::lock_guard<std::mutex> lock(g_err_mutex);
@@ -2070,6 +2534,18 @@ char *sensi_get_status_json(void) {
              "\"lastHeartbeatAgoMs\":%lld,\"uptimeMs\":%lld,\"lastErrorCode\":%d,"
              "\"rotation\":%d,\"rotationKnown\":%s,\"suspended\":%s,"
              "\"edgeMarginPct\":%d,\"softRecenter\":%s,\"reanchor\":%s,"
+             "\"mode\":%d,\"modeName\":\"%s\",\"styleId\":%d,"
+             "\"styleEnabled\":%s,\"styleIntensity\":%.0f,"
+             "\"styleStiffness\":%.0f,\"styleDamping\":%.0f,"
+             "\"styleLatencyAvgUs\":%llu,\"styleLatencyMaxUs\":%llu,"
+             "\"styleProcAvgUs\":%llu,\"styleProcMaxUs\":%llu,"
+             "\"dragValue\":%d,\"dragShape\":%d,\"dragEasing\":%d,"
+             "\"dragDirection\":%d,\"dragLengthRef\":%d,"
+             "\"dragStopOutside\":%s,\"dragNoiseAmp\":%.2f,"
+             "\"dragNoisePeriod\":%d,\"dragVelocityRef\":%.2f,"
+             "\"zoneValid\":%s,\"zoneCx\":%d,\"zoneCy\":%d,\"zoneR\":%d,"
+             "\"screenW\":%d,\"screenH\":%d,\"zoneUpdates\":%llu,"
+             "\"framesScaled\":%llu,\"dragFrames\":%llu,\"dragGainMax\":%.2f,"
              "\"clampX\":%llu,\"clampY\":%llu,\"reanchors\":%llu,"
              "\"lastError\":\"%s\"}",
              state_name(g_state.load()),
@@ -2095,6 +2571,33 @@ char *sensi_get_status_json(void) {
              g_edge_margin_pct.load(),
              g_soft_recenter.load() ? "true" : "false",
              g_reanchor.load() ? "true" : "false",
+             cfg.mode,
+             cfg.mode == sensitune::MODE_DRAG ? "DRAG" : "SENSITIVITY",
+             cfg.style.id,
+             cfg.style.enabled ? "true" : "false",
+             (double) cfg.style.intensity,
+             (double) cfg.style.stiffness,
+             (double) cfg.style.damping,
+             (unsigned long long) style_lat_avg,
+             (unsigned long long) g_style_lat_max_us.load(),
+             (unsigned long long) (style_frames ? g_style_proc_sum_us.load() / style_frames : 0),
+             (unsigned long long) g_style_proc_max_us.load(),
+             cfg.drag.valuePct,
+             cfg.drag.shape,
+             cfg.drag.easing,
+             cfg.drag.direction,
+             cfg.drag.lengthRefPx,
+             cfg.drag.stopOutside ? "true" : "false",
+             (double) cfg.drag.noiseAmp,
+             cfg.drag.noisePeriodPx,
+             (double) cfg.drag.velocityRefPxMs,
+             cfg.zone.valid ? "true" : "false",
+             cfg.zone.cx, cfg.zone.cy, cfg.zone.radius,
+             cfg.zone.screenW, cfg.zone.screenH,
+             (unsigned long long) g_zone_updates.load(),
+             (unsigned long long) g_frames_scaled.load(),
+             (unsigned long long) g_drag_frames.load(),
+             (double) (g_drag_gain_max_milli.load() / 1000.0),
              (unsigned long long) g_clamp_x.load(),
              (unsigned long long) g_clamp_y.load(),
              (unsigned long long) g_reanchor_count.load(),
@@ -2330,6 +2833,85 @@ Java_com_example_sensitune_NativeBridge_getLogs(JNIEnv *env, jclass, jint since_
     return result;
 }
 
+static thread_local sensitune::StyleRuntime g_preview_style;
+
+JNIEXPORT void JNICALL
+Java_com_example_sensitune_NativeBridge_previewReset(JNIEnv *, jclass) {
+    sensitune::style_reset(g_preview_style);
+}
+
+JNIEXPORT jfloatArray JNICALL
+Java_com_example_sensitune_NativeBridge_previewStyle(
+        JNIEnv *env, jclass, jint style, jint intensity, jfloat stiffness,
+        jfloat damping, jfloat dx, jfloat dy, jfloat dt_ms) {
+    sensitune::StyleConfig cfg;
+    cfg.id = style;
+    cfg.enabled = true;
+    cfg.intensity = (float) intensity;
+    cfg.stiffness = stiffness;
+    cfg.damping = damping;
+    float ox = dx, oy = dy;
+    float dt = dt_ms / 1000.0f;
+    sensitune::style_process(cfg, dx, dy, dt, g_preview_style, &ox, &oy);
+    jfloatArray arr = env->NewFloatArray(2);
+    if (arr) {
+        jfloat values[2] = {ox, oy};
+        env->SetFloatArrayRegion(arr, 0, 2, values);
+    }
+    return arr;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_example_sensitune_NativeBridge_dragPreviewExtra(JNIEnv *, jclass,
+                                                         jint shape, jint easing,
+                                                         jfloat amp, jfloat period,
+                                                         jfloat u) {
+    sensitune::DragConfig cfg;
+    cfg.shape = shape;
+    cfg.easing = easing;
+    cfg.noiseAmp = amp;
+    cfg.noisePeriodPx = period > 1.0f ? (int) period : 1;
+    cfg.lengthRefPx = 1000;
+    const float L = sensitune::clampf(u, 0.0f, 1.0f) * 1000.0f;
+    const float speed = sensitune::clampf(u, 0.0f, 1.0f) * cfg.velocityRefPxMs;
+    return sensitune::drag_extra(cfg, L, speed);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_example_sensitune_NativeBridge_setMode(JNIEnv *, jclass, jint mode) {
+    return sensi_set_mode(mode);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_example_sensitune_NativeBridge_setStyle(JNIEnv *, jclass, jint style,
+                                                 jboolean enabled, jint intensity,
+                                                 jfloat stiffness, jfloat damping) {
+    return sensi_set_style(style, enabled ? 1 : 0, intensity, stiffness, damping);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_example_sensitune_NativeBridge_setDragConfig(
+        JNIEnv *, jclass, jint value_pct, jint shape, jint easing, jint direction,
+        jint length_ref_px, jboolean stop_outside, jint noise_amp_pct,
+        jint noise_period_px, jfloat velocity_ref_px_ms) {
+    return sensi_set_drag_config(value_pct, shape, easing, direction, length_ref_px,
+                                 stop_outside ? 1 : 0, noise_amp_pct,
+                                 noise_period_px, velocity_ref_px_ms);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_example_sensitune_NativeBridge_setDragZone(JNIEnv *, jclass, jint cx,
+                                                    jint cy, jint radius,
+                                                    jint screen_w, jint screen_h,
+                                                    jint rotation) {
+    return sensi_set_drag_zone(cx, cy, radius, screen_w, screen_h, rotation);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_example_sensitune_NativeBridge_nativeVersion(JNIEnv *, jclass) {
+    return 2;
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_example_sensitune_NativeBridge_diagnose(JNIEnv *env, jclass) {
     char *json = sensi_diagnose_json();
@@ -2337,11 +2919,6 @@ Java_com_example_sensitune_NativeBridge_diagnose(JNIEnv *env, jclass) {
     jstring result = env->NewStringUTF(json);
     free(json);
     return result;
-}
-
-JNIEXPORT jint JNICALL
-Java_com_example_sensitune_NativeBridge_nativeVersion(JNIEnv *, jclass) {
-    return 1;
 }
 
 } // extern "C"

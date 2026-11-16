@@ -325,6 +325,46 @@ class DebugLogActivity : Activity() {
             )
             sb.appendLine(
                 getString(
+                    R.string.debug_mode,
+                    o.optString("modeName", "SENSITIVITY"),
+                    if (o.optBoolean("styleEnabled", false)) {
+                        val id = o.optInt("styleId", 0)
+                        FloatMenu.STYLE_NAMES.getOrElse(id) { "#$id" }
+                    } else "OFF (Raw)",
+                    o.optInt("styleIntensity", 0)
+                )
+            )
+            sb.appendLine(
+                getString(
+                    R.string.debug_style_latency,
+                    o.optLong("styleLatencyAvgUs", 0),
+                    o.optLong("styleLatencyMaxUs", 0)
+                )
+            )
+            sb.appendLine(
+                getString(
+                    R.string.debug_drag,
+                    o.optInt("dragValue", 0),
+                    o.optInt("dragShape", 0),
+                    o.optInt("dragEasing", 0),
+                    o.optInt("dragDirection", 0),
+                    o.optInt("dragLengthRef", 220)
+                )
+            )
+            sb.appendLine(
+                getString(
+                    R.string.debug_zone,
+                    if (o.optBoolean("zoneValid", false)) "ON" else "OFF",
+                    o.optInt("zoneCx", 0),
+                    o.optInt("zoneCy", 0),
+                    o.optInt("zoneR", 0),
+                    o.optInt("screenW", 0),
+                    o.optInt("screenH", 0),
+                    o.optDouble("dragGainMax", 1.0)
+                )
+            )
+            sb.appendLine(
+                getString(
                     R.string.debug_perf,
                     o.optLong("eventsPerSec", 0),
                     o.optLong("latencyAvgUs", 0),

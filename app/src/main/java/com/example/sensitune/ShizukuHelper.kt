@@ -383,6 +383,54 @@ object ShizukuHelper {
         return service != null
     }
 
+    fun setMode(mode: Int): Boolean {
+        call("setMode", Unit) { it.setMode(mode) }
+        return service != null
+    }
+
+    fun setStyle(
+        style: Int,
+        enabled: Boolean,
+        intensity: Int,
+        stiffness: Float,
+        damping: Float
+    ): Boolean {
+        call("setStyle", Unit) { it.setStyle(style, enabled, intensity, stiffness, damping) }
+        return service != null
+    }
+
+    fun setDragConfig(
+        valuePct: Int,
+        shape: Int,
+        easing: Int,
+        direction: Int,
+        lengthRefPx: Int,
+        stopOutside: Boolean,
+        noiseAmpPct: Int,
+        noisePeriodPx: Int,
+        velocityRefPxMs: Float
+    ): Boolean {
+        call("setDragConfig", Unit) {
+            it.setDragConfig(
+                valuePct, shape, easing, direction, lengthRefPx, stopOutside,
+                noiseAmpPct, noisePeriodPx, velocityRefPxMs
+            )
+        }
+        return service != null
+    }
+
+    fun setDragZone(
+        cx: Int,
+        cy: Int,
+        radius: Int,
+        screenW: Int,
+        screenH: Int,
+        rotation: Int
+    ): Boolean {
+        call("setDragZone", Unit) { it.setDragZone(cx, cy, radius, screenW, screenH, rotation) }
+        return service != null
+    }
+
     fun heartbeat() {
         val s = service ?: return
         try {

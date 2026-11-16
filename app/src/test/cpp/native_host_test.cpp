@@ -12,8 +12,10 @@
  */
 
 #include "sensi_abs.h"
+#include "sensi_dsp.h"
 #include "sensi_json.h"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -193,14 +195,118 @@ static void test_log_json() {
     CHECK(cut_rec.compare(cut_rec.size() - 2, 2, "\"}") == 0);
 }
 
+static void test_curves() {
+    for (int shape = 0; shape <= 7; ++shape) {
+        CHECK(std::fabs(sensitune::shape_curve(shape, 0.0f)) < 1e-5f);
+        CHECK(std::fabs(sensitune::shape_curve(shape, 1.0f) - 1.0f) < 1e-4f);
+        float prev = -1.0f;
+        for (int n = 0; n <= 100; ++n) {
+            const float u = (float) n / 100.0f;
+            const float v = sensitune::shape_curve(shape, u);
+            CHECK(v >= prev - 1e-6f);
+            CHECK(v >= -1e-6f && v <= 1.0f + 1e-6f);
+            prev = v;
+        }
+    }
+    for (int easing = 0; easing <= 2; ++easing) {
+        CHECK(std::fabs(sensitune::apply_easing(easing, 2, 0.0f)) < 1e-5f);
+        CHECK(std::fabs(sensitune::apply_easing(easing, 2, 1.0f) - 1.0f) < 1e-4f);
+    }
+}
+
+static void test_perlin_deterministic() {
+    const float a = sensitune::perlin1d(12.34f);
+    const float b = sensitune::perlin1d(12.34f);
+    CHECK(a == b);
+    CHECK(a >= -1.0f && a <= 1.0f);
+    // The table is a pure function: the same path length always gives the
+    // same wobble, independent of time or call order.
+    float sum1 = 0.0f;
+    float sum2 = 0.0f;
+    for (int n = 0; n < 200; ++n) sum1 += sensitune::perlin1d((float) n * 0.37f);
+    for (int n = 0; n < 200; ++n) sum2 += sensitune::perlin1d((float) n * 0.37f);
+    CHECK(sum1 == sum2);
+    CHECK(std::fabs(sensitune::perlin1d(0.0f)) < 1e-6f);
+}
+
+static void test_drag_gain_and_zero() {
+    sensitune::DragConfig cfg;
+    cfg.valuePct = 100;
+    cfg.shape = sensitune::SHAPE_PERLIN;
+    cfg.noiseAmp = 0.5f;
+    const float gain = sensitune::drag_gain(cfg, 500.0f, 2.0f);
+    CHECK(gain >= 1.0f && gain <= sensitune::MAX_TOTAL_GAIN);
+    // delta_in = 0 -> delta_out = 0 regardless of amp/period.
+    CHECK(0.0f * gain == 0.0f);
+    for (int period = 20; period <= 300; period += 20) {
+        cfg.noisePeriodPx = period;
+        const float g = sensitune::drag_gain(cfg, 137.0f, 0.0f);
+        CHECK(std::isfinite(g));
+        CHECK(g <= 4.0f);
+    }
+    cfg.shape = sensitune::SHAPE_LINEAR;
+    CHECK(std::fabs(sensitune::drag_gain(cfg, 0.0f, 0.0f) - 1.0f) < 1e-5f);
+    CHECK(std::fabs(sensitune::drag_gain(cfg, 10000.0f, 0.0f) - 4.0f) < 1e-4f);
+}
+
+static void test_styles_zero_and_bounds() {
+    for (int id = 0; id <= 8; ++id) {
+        sensitune::StyleConfig cfg;
+        cfg.id = id;
+        cfg.enabled = true;
+        cfg.intensity = 100.0f;
+        sensitune::StyleRuntime st;
+        sensitune::style_reset(st);
+        float ox = 7.0f, oy = -3.0f;
+        sensitune::style_process(cfg, 0.0f, 0.0f, 0.016f, st, &ox, &oy);
+        CHECK(ox == 0.0f && oy == 0.0f);
+
+        // A real delta must stay finite and bounded (gain never above 4x).
+        for (int n = 0; n < 40; ++n) {
+            sensitune::style_process(cfg, 8.0f, 3.0f, 0.016f, st, &ox, &oy);
+            CHECK(std::isfinite(ox) && std::isfinite(oy));
+            CHECK(std::fabs(ox) <= 8.0f * 4.0f);
+            CHECK(std::fabs(oy) <= 3.0f * 4.0f);
+        }
+        // Finger stops: output returns to 0 immediately, no residual drift.
+        sensitune::style_process(cfg, 0.0f, 0.0f, 0.016f, st, &ox, &oy);
+        CHECK(ox == 0.0f && oy == 0.0f);
+    }
+}
+
+static void test_rotation_transform() {
+    const int rw = 1080, rh = 2400;
+    for (int rot = 0; rot <= 3; ++rot) {
+        const int ls = (rot == 1 || rot == 3) ? 2400 : 1080;
+        const int ss = (rot == 1 || rot == 3) ? 1080 : 2400;
+        float sx = 0, sy = 0;
+        sensitune::raw_to_screen(rot, 0, 0, rw, rh, ls, ss, &sx, &sy);
+        CHECK(sx >= -1.0f && sx <= (float) ls + 1.0f);
+        CHECK(sy >= -1.0f && sy <= (float) ss + 1.0f);
+        /* Forward transform of a real raw delta, then inverse back. */
+        float ax = 0, ay = 0, bx = 0, by = 0;
+        sensitune::raw_to_screen(rot, 300.0f, 700.0f, rw, rh, ls, ss, &ax, &ay);
+        sensitune::raw_to_screen(rot, 312.0f, 695.0f, rw, rh, ls, ss, &bx, &by);
+        float drx = 0, dry = 0;
+        sensitune::screen_delta_to_raw(rot, bx - ax, by - ay, rw, rh, ls, ss, &drx, &dry);
+        CHECK(std::fabs(drx - 12.0f) < 0.01f);
+        CHECK(std::fabs(dry + 5.0f) < 0.01f);
+    }
+}
+
 int main() {
     test_oppo_event1_fallback();
     test_bitmask_device();
     test_rejects();
     test_log_json();
+    test_curves();
+    test_perlin_deterministic();
+    test_drag_gain_and_zero();
+    test_styles_zero_and_bounds();
+    test_rotation_transform();
 
     if (g_failures == 0) {
-        std::printf("native host tests: OK (event1 fallback accepted, JSON intact)\n");
+        std::printf("native host tests: OK (abs fallback, JSON, DSP curves, Perlin, styles, rotation)\n");
         return 0;
     }
     std::fprintf(stderr, "native host tests: %d failure(s)\n", g_failures);

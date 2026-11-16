@@ -13,13 +13,167 @@ class Prefs(context: Context) {
     private val sp = context.applicationContext
         .getSharedPreferences("sensi_prefs", Context.MODE_PRIVATE)
 
+    /** Total gain is capped at 4.0x by the engine, so the UI never stores more. */
     var factorX: Float
-        get() = sp.getFloat(KEY_X, 1.0f)
-        set(value) = sp.edit().putFloat(KEY_X, value).apply()
+        get() = sp.getFloat(KEY_X, 1.0f).coerceIn(0.5f, 4.0f)
+        set(value) = sp.edit().putFloat(KEY_X, value.coerceIn(0.5f, 4.0f)).apply()
 
     var factorY: Float
-        get() = sp.getFloat(KEY_Y, 1.0f)
-        set(value) = sp.edit().putFloat(KEY_Y, value).apply()
+        get() = sp.getFloat(KEY_Y, 1.0f).coerceIn(0.5f, 4.0f)
+        set(value) = sp.edit().putFloat(KEY_Y, value.coerceIn(0.5f, 4.0f)).apply()
+
+    // ------------------------------------------------------------------
+    // Mode + shared STYLE + DRAG settings (engine reads them through AIDL)
+    // ------------------------------------------------------------------
+
+    /** 0 = Sensitivity, 1 = Drag. */
+    var mode: Int
+        get() = sp.getInt(KEY_MODE, 0).coerceIn(0, 1)
+        set(value) = sp.edit().putInt(KEY_MODE, value.coerceIn(0, 1)).apply()
+
+    /** Per-app mode used when "chỉ trong app đã chọn" is on. */
+    fun modeFor(pkg: String?): Int {
+        if (pkg == null) return mode
+        val raw = sp.getString(KEY_PER_APP_MODE, "{}") ?: "{}"
+        return try {
+            JSONObject(raw).optInt(pkg, mode)
+        } catch (t: Throwable) {
+            mode
+        }
+    }
+
+    fun setModeFor(pkg: String?, value: Int) {
+        if (pkg == null) {
+            mode = value
+            return
+        }
+        val raw = sp.getString(KEY_PER_APP_MODE, "{}") ?: "{}"
+        val obj = try {
+            JSONObject(raw)
+        } catch (t: Throwable) {
+            JSONObject()
+        }
+        obj.put(pkg, value.coerceIn(0, 1))
+        sp.edit().putString(KEY_PER_APP_MODE, obj.toString()).apply()
+    }
+
+    fun clearModeFor(pkg: String) {
+        val raw = sp.getString(KEY_PER_APP_MODE, "{}") ?: "{}"
+        val obj = try {
+            JSONObject(raw)
+        } catch (t: Throwable) {
+            return
+        }
+        obj.remove(pkg)
+        sp.edit().putString(KEY_PER_APP_MODE, obj.toString()).apply()
+    }
+
+    var styleEnabled: Boolean
+        get() = sp.getBoolean(KEY_STYLE_ENABLED, false)
+        set(value) = sp.edit().putBoolean(KEY_STYLE_ENABLED, value).apply()
+
+    /** 0 Raw, 1 Smooth, 2 Adaptive, 3 Snappy, 4 Elastic, 5 Precision, 6 S-curve, 7 Power, 8 Stepped. */
+    var styleId: Int
+        get() = sp.getInt(KEY_STYLE_ID, 0).coerceIn(0, 8)
+        set(value) = sp.edit().putInt(KEY_STYLE_ID, value.coerceIn(0, 8)).apply()
+
+    var styleIntensity: Int
+        get() = sp.getInt(KEY_STYLE_INTENSITY, 50).coerceIn(0, 100)
+        set(value) = sp.edit().putInt(KEY_STYLE_INTENSITY, value.coerceIn(0, 100)).apply()
+
+    var styleStiffness: Float
+        get() = sp.getFloat(KEY_STYLE_STIFFNESS, 320f).coerceIn(40f, 900f)
+        set(value) = sp.edit().putFloat(KEY_STYLE_STIFFNESS, value.coerceIn(40f, 900f)).apply()
+
+    var styleDamping: Float
+        get() = sp.getFloat(KEY_STYLE_DAMPING, 28f).coerceIn(2f, 120f)
+        set(value) = sp.edit().putFloat(KEY_STYLE_DAMPING, value.coerceIn(2f, 120f)).apply()
+
+    /** 0..100, mapped to 1.0x + 3.0x * extra. */
+    var dragValue: Int
+        get() = sp.getInt(KEY_DRAG_VALUE, 50).coerceIn(0, 100)
+        set(value) = sp.edit().putInt(KEY_DRAG_VALUE, value.coerceIn(0, 100)).apply()
+
+    /** 0..7 base curves, 8 Perlin, 9 Velocity. */
+    var dragShape: Int
+        get() = sp.getInt(KEY_DRAG_SHAPE, 0).coerceIn(0, 9)
+        set(value) = sp.edit().putInt(KEY_DRAG_SHAPE, value.coerceIn(0, 9)).apply()
+
+    /** 0 In, 1 Out, 2 InOut. */
+    var dragEasing: Int
+        get() = sp.getInt(KEY_DRAG_EASING, 0).coerceIn(0, 2)
+        set(value) = sp.edit().putInt(KEY_DRAG_EASING, value.coerceIn(0, 2)).apply()
+
+    /** 0 Any, 1 Horizontal, 2 Vertical, 3 Up, 4 Down. */
+    var dragDirection: Int
+        get() = sp.getInt(KEY_DRAG_DIRECTION, 0).coerceIn(0, 4)
+        set(value) = sp.edit().putInt(KEY_DRAG_DIRECTION, value.coerceIn(0, 4)).apply()
+
+    var dragLengthRef: Int
+        get() = sp.getInt(KEY_DRAG_LREF, 220).coerceIn(20, 2000)
+        set(value) = sp.edit().putInt(KEY_DRAG_LREF, value.coerceIn(20, 2000)).apply()
+
+    var dragStopOutside: Boolean
+        get() = sp.getBoolean(KEY_DRAG_STOP, false)
+        set(value) = sp.edit().putBoolean(KEY_DRAG_STOP, value).apply()
+
+    var dragNoiseAmp: Int
+        get() = sp.getInt(KEY_DRAG_AMP, 15).coerceIn(0, 50)
+        set(value) = sp.edit().putInt(KEY_DRAG_AMP, value.coerceIn(0, 50)).apply()
+
+    var dragNoisePeriod: Int
+        get() = sp.getInt(KEY_DRAG_PERIOD, 90).coerceIn(20, 300)
+        set(value) = sp.edit().putInt(KEY_DRAG_PERIOD, value.coerceIn(20, 300)).apply()
+
+    var dragVelocityRef: Float
+        get() = sp.getFloat(KEY_DRAG_VREF, 2.0f).coerceIn(0.1f, 20f)
+        set(value) = sp.edit().putFloat(KEY_DRAG_VREF, value.coerceIn(0.1f, 20f)).apply()
+
+    var dragSizeDp: Int
+        get() = sp.getInt(KEY_DRAG_SIZE_DP, 120).coerceIn(48, 240)
+        set(value) = sp.edit().putInt(KEY_DRAG_SIZE_DP, value.coerceIn(48, 240)).apply()
+
+    var dragAlpha: Float
+        get() = sp.getFloat(KEY_DRAG_ALPHA, 0.35f).coerceIn(0.05f, 0.8f)
+        set(value) = sp.edit().putFloat(KEY_DRAG_ALPHA, value.coerceIn(0.05f, 0.8f)).apply()
+
+    var dragLocked: Boolean
+        get() = sp.getBoolean(KEY_DRAG_LOCKED, true)
+        set(value) = sp.edit().putBoolean(KEY_DRAG_LOCKED, value).apply()
+
+    fun dragX(landscape: Boolean): Int =
+        sp.getInt(if (landscape) KEY_DRAG_X_LAND else KEY_DRAG_X_PORT, -1)
+
+    fun dragY(landscape: Boolean): Int =
+        sp.getInt(if (landscape) KEY_DRAG_Y_LAND else KEY_DRAG_Y_PORT, -1)
+
+    fun setDragPos(x: Int, y: Int, landscape: Boolean) {
+        sp.edit()
+            .putInt(if (landscape) KEY_DRAG_X_LAND else KEY_DRAG_X_PORT, x)
+            .putInt(if (landscape) KEY_DRAG_Y_LAND else KEY_DRAG_Y_PORT, y)
+            .apply()
+    }
+
+    fun resetDragDefaults() {
+        sp.edit()
+            .putInt(KEY_DRAG_VALUE, 50)
+            .putInt(KEY_DRAG_SHAPE, 0)
+            .putInt(KEY_DRAG_EASING, 0)
+            .putInt(KEY_DRAG_DIRECTION, 0)
+            .putInt(KEY_DRAG_LREF, 220)
+            .putBoolean(KEY_DRAG_STOP, false)
+            .putInt(KEY_DRAG_AMP, 15)
+            .putInt(KEY_DRAG_PERIOD, 90)
+            .putFloat(KEY_DRAG_VREF, 2.0f)
+            .putInt(KEY_DRAG_SIZE_DP, 120)
+            .putFloat(KEY_DRAG_ALPHA, 0.35f)
+            .putBoolean(KEY_STYLE_ENABLED, false)
+            .putInt(KEY_STYLE_ID, 0)
+            .putInt(KEY_STYLE_INTENSITY, 50)
+            .putFloat(KEY_STYLE_STIFFNESS, 320f)
+            .putFloat(KEY_STYLE_DAMPING, 28f)
+            .apply()
+    }
 
     var lockXY: Boolean
         get() = sp.getBoolean(KEY_LOCK_XY, true)
@@ -235,6 +389,29 @@ class Prefs(context: Context) {
     private companion object {
         const val KEY_X = "factor_x"
         const val KEY_Y = "factor_y"
+        const val KEY_MODE = "mode"
+        const val KEY_PER_APP_MODE = "per_app_mode"
+        const val KEY_STYLE_ENABLED = "style_enabled"
+        const val KEY_STYLE_ID = "style_id"
+        const val KEY_STYLE_INTENSITY = "style_intensity"
+        const val KEY_STYLE_STIFFNESS = "style_stiffness"
+        const val KEY_STYLE_DAMPING = "style_damping"
+        const val KEY_DRAG_VALUE = "drag_value"
+        const val KEY_DRAG_SHAPE = "drag_shape"
+        const val KEY_DRAG_EASING = "drag_easing"
+        const val KEY_DRAG_DIRECTION = "drag_direction"
+        const val KEY_DRAG_LREF = "drag_lref"
+        const val KEY_DRAG_STOP = "drag_stop_outside"
+        const val KEY_DRAG_AMP = "drag_noise_amp"
+        const val KEY_DRAG_PERIOD = "drag_noise_period"
+        const val KEY_DRAG_VREF = "drag_velocity_ref"
+        const val KEY_DRAG_SIZE_DP = "drag_size_dp"
+        const val KEY_DRAG_ALPHA = "drag_alpha"
+        const val KEY_DRAG_LOCKED = "drag_locked"
+        const val KEY_DRAG_X_PORT = "drag_x_portrait"
+        const val KEY_DRAG_Y_PORT = "drag_y_portrait"
+        const val KEY_DRAG_X_LAND = "drag_x_landscape"
+        const val KEY_DRAG_Y_LAND = "drag_y_landscape"
         const val KEY_LOCK_XY = "lock_xy"
         const val KEY_EDGE_MARGIN = "edge_margin_pct"
         const val KEY_SOFT_RECENTER = "soft_recenter"

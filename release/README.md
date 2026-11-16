@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| File | `SensiTune-1.1.0.apk` |
+| File | `SensiTune-1.2.0.apk` |
 | Package | `com.example.sensitune` |
-| versionCode / versionName | `5` / `1.1.0` |
+| versionCode / versionName | `6` / `1.2.0` |
 | minSdk / targetSdk / compileSdk | 26 / 34 / 34 |
 | ABI | `arm64-v8a`, `armeabi-v7a` |
 | Kích thước | ~1.7 MB |
@@ -17,7 +17,7 @@
 ## Kiểm tra chữ ký
 
 ```bash
-apksigner verify --verbose --print-certs release/SensiTune-1.1.0.apk
+apksigner verify --verbose --print-certs release/SensiTune-1.2.0.apk
 # Verified using v2 scheme (APK Signature Scheme v2): true
 # Verified using v3 scheme (APK Signature Scheme v3): true
 sha256sum -c release/SHA256SUMS.txt
@@ -26,25 +26,35 @@ sha256sum -c release/SHA256SUMS.txt
 ## Cài đặt
 
 ```bash
-adb install -r release/SensiTune-1.1.0.apk
+adb install -r release/SensiTune-1.2.0.apk
 ```
 
-## Thay đổi ở 1.1.0
+## Thay đổi ở 1.2.0
 
-- **Hết kẹt mép:** soft recenter theo offset riêng từng trục thô, vùng đệm `edgeMargin`
-  (0–25%, mặc định 12%), clamp full `[min,max]`; tuỳ chọn “Chạm lại ở giữa” (mặc định tắt).
-- **Xoay máy đúng X/Y:** AIDL `setRotation`, hệ số được chốt theo rotation cho từng ngón;
-  X = ngang, Y = dọc của màn hình hiện tại.
-- **Menu nổi dùng slider X/Y (0.50–2.50):** tạm ngưng nhân hệ số khi bảng mở (vẫn grab),
-  giá trị gửi coalesce/debounce 50 ms trên HandlerThread riêng.
-- **Bộ widget dùng chung `ui/kit`** cho menu nổi, màn hình chính và AppPicker.
+- **Hai mode:** `Mode ▾` (Sensitivity / Drag) ở đầu menu nổi và màn hình chính; lưu riêng
+  theo từng app khi bật “chỉ trong app đã chọn”.
+- **Drag mode:** chỉ ngón chạm trong vòng tròn mới bị biến đổi, gain tăng theo quãng kéo
+  hoặc tốc độ; 8 đường cong + Perlin (bảng cố định, không rand/seed) + Velocity; Dạng
+  In/Out/InOut; lọc hướng; tuỳ chọn dừng khi ra khỏi vòng. Tổng gain luôn ≤ 4.0x.
+- **STYLE chung:** Raw, Smooth, Adaptive (1€), Snappy, Elastic (lò xo bậc 2, dt theo
+  timestamp event, input 0 → output 0), Precision, S-curve, Power, Stepped; cường độ
+  0–100, stiffness/damping cho Elastic, đồ thị xem trước.
+- **Overlay DragZoneView:** vòng tròn khoá xuyên chạm, mở khoá để kéo thả, tự khoá sau 15 s,
+  vị trí lưu riêng dọc/ngang; khi chưa có zone hợp lệ engine pass-through hoàn toàn.
+- **FloatMenu 3 tab** `[Mode hiện tại] [Style] [HUD]`; tab HUD khôi phục đủ chỉ số, thứ tự,
+  cỡ chữ, độ mờ, cột/hàng, ngưỡng vàng/đỏ, khoá vị trí và mũi tên 8 px. Nút NHẢ luôn hiện.
+- **Cấu hình engine kiểu RCU:** snapshot bất biến hoán đổi atomic, chốt theo từng ngón;
+  mọi thay đổi gửi qua AIDL, coalesce/debounce 50 ms ngoài main thread.
+- **TestPadActivity** vẽ đường ngón (xanh) và đầu ra (đỏ) bằng đúng DSP native; màn hình
+  Debug đọc `getStatus` để hiển thị mode/style/drag/zone mà engine đang áp dụng.
+- **Trần hệ số hạ về 4.00** ở màn hình chính và AppPicker theo quy tắc tổng gain ≤ 4.0x.
 
 APK này ký bằng chứng chỉ tự tạo, **khác** với bản debug (`./gradlew assembleDebug`).
 Nếu máy đang cài bản debug cùng package, phải gỡ trước:
 
 ```bash
 adb uninstall com.example.sensitune
-adb install release/SensiTune-1.1.0.apk
+adb install release/SensiTune-1.2.0.apk
 ```
 
 ## Ghi chú bảo mật
