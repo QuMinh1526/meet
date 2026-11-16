@@ -3,20 +3,27 @@ package com.example.sensitune
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.provider.Settings
 import android.text.method.ScrollingMovementMethod
+import android.view.Display
+import android.view.Surface
 import android.view.View
 import android.widget.Button
 import android.widget.CompoundButton
-import android.widget.SeekBar
+import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import com.example.sensitune.ui.kit.LabeledSlider
+import com.example.sensitune.ui.kit.SectionCard
+import com.example.sensitune.ui.kit.ToggleRow
 import org.json.JSONObject
 import kotlin.math.roundToInt
 
@@ -35,11 +42,10 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
     private lateinit var tvService: TextView
     private lateinit var swEnable: Switch
     private lateinit var btnEmergency: Button
-    private lateinit var tvFactorX: TextView
-    private lateinit var tvFactorY: TextView
-    private lateinit var sbX: SeekBar
-    private lateinit var sbY: SeekBar
-    private lateinit var swLock: Switch
+    private lateinit var llSensitivity: LinearLayout
+    private lateinit var sliderFactorX: LabeledSlider
+    private lateinit var sliderFactorY: LabeledSlider
+    private lateinit var rowLockXY: ToggleRow
     private lateinit var btnTest: Button
     private lateinit var tvTestResult: TextView
     private lateinit var btnDiagnose: Button
@@ -57,11 +63,33 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
     private lateinit var tvOverlayPermission: TextView
 
     private var suppressSwitchCallbacks = false
-    private var suppressSeekCallbacks = false
     private var testing = false
     private var testSecondsLeft = 0
     private var enableInProgress = false
     private var nullStatusCount = 0
+
+    // One binder I/O thread for factors/settings/rotation; factor values are
+    // coalesced (latest wins, 50 ms debounce) so dragging never floods Binder.
+    private var engineIoThread: HandlerThread? = null
+
+    @Volatile
+    private var engineIoHandler: Handler? = null
+    private val factorLock = Any()
+    private var pendingFactorX = 1f
+    private var pendingFactorY = 1f
+    private var factorPending = false
+
+    private val factorSendRunnable = Runnable {
+        val x: Float
+        val y: Float
+        synchronized(factorLock) {
+            if (!factorPending) return@Runnable
+            factorPending = false
+            x = pendingFactorX
+            y = pendingFactorY
+        }
+        ShizukuHelper.setFactor(x, y)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,6 +98,7 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
         prefs = Prefs(this)
         bindViews()
         setupFactorSliders()
+        setupEdgeSettings()
         setupSwitches()
         setupOverlayControls()
         setupButtons()
@@ -91,11 +120,7 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
         tvService = findViewById(R.id.tvService)
         swEnable = findViewById(R.id.swEnable)
         btnEmergency = findViewById(R.id.btnEmergency)
-        tvFactorX = findViewById(R.id.tvFactorX)
-        tvFactorY = findViewById(R.id.tvFactorY)
-        sbX = findViewById(R.id.sbFactorX)
-        sbY = findViewById(R.id.sbFactorY)
-        swLock = findViewById(R.id.swLockXY)
+        llSensitivity = findViewById(R.id.llSensitivity)
         btnTest = findViewById(R.id.btnTest)
         tvTestResult = findViewById(R.id.tvTestResult)
         btnDiagnose = findViewById(R.id.btnDiagnose)
@@ -183,81 +208,152 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
     }
 
     // ------------------------------------------------------------------
-    // Sliders
+    // Sensitivity + edge settings (shared ui.kit widgets)
     // ------------------------------------------------------------------
 
     private fun setupFactorSliders() {
-        sbX.max = FACTOR_MAX_STEPS
-        sbY.max = FACTOR_MAX_STEPS
-        suppressSeekCallbacks = true
-        sbX.progress = progressFromFactor(prefs.factorX)
-        sbY.progress = progressFromFactor(prefs.factorY)
-        suppressSeekCallbacks = false
-        swLock.isChecked = prefs.lockXY
-        updateFactorLabels()
+        val card = SectionCard(this, getString(R.string.sensitivity_section))
+        sliderFactorX = LabeledSlider(
+            this, getString(R.string.factor_x_horizontal), 0.50f, 10f, 0.05f, prefs.factorX
+        )
+        sliderFactorY = LabeledSlider(
+            this, getString(R.string.factor_y_vertical), 0.50f, 10f, 0.05f, prefs.factorY
+        )
 
-        sbX.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (!fromUser || suppressSeekCallbacks) return
-                val fx = factorFromProgress(progress)
-                prefs.factorX = fx
+        sliderFactorX.onChange = { value, fromUser ->
+            if (fromUser) {
+                prefs.factorX = value
                 if (prefs.lockXY) {
-                    prefs.factorY = fx
-                    suppressSeekCallbacks = true
-                    sbY.progress = progressFromFactor(fx)
-                    suppressSeekCallbacks = false
+                    prefs.factorY = value
+                    sliderFactorY.setValue(value, notify = false)
                 }
-                updateFactorLabels()
-                applyFactorLive(fx, prefs.factorY)
+                applyFactorLive(prefs.factorX, prefs.factorY)
             }
-
-            override fun onStartTrackingTouch(bar: SeekBar?) {}
-            override fun onStopTrackingTouch(bar: SeekBar?) {}
-        })
-
-        sbY.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (!fromUser || suppressSeekCallbacks) return
-                val fy = factorFromProgress(progress)
-                prefs.factorY = fy
+        }
+        sliderFactorX.onStopTracking = { applyFactorLive(prefs.factorX, prefs.factorY) }
+        sliderFactorY.onChange = { value, fromUser ->
+            if (fromUser) {
+                prefs.factorY = value
                 if (prefs.lockXY) {
-                    prefs.factorX = fy
-                    suppressSeekCallbacks = true
-                    sbX.progress = progressFromFactor(fy)
-                    suppressSeekCallbacks = false
+                    prefs.factorX = value
+                    sliderFactorX.setValue(value, notify = false)
                 }
-                updateFactorLabels()
-                applyFactorLive(prefs.factorX, fy)
+                applyFactorLive(prefs.factorX, prefs.factorY)
             }
+        }
+        sliderFactorY.onStopTracking = { applyFactorLive(prefs.factorX, prefs.factorY) }
 
-            override fun onStartTrackingTouch(bar: SeekBar?) {}
-            override fun onStopTrackingTouch(bar: SeekBar?) {}
-        })
+        card.addRow(sliderFactorX)
+        card.addRow(sliderFactorY)
+
+        rowLockXY = ToggleRow(this, getString(R.string.lock_xy), prefs.lockXY)
+        rowLockXY.onCheckedChange = { checked ->
+            prefs.lockXY = checked
+            if (checked) {
+                prefs.factorY = prefs.factorX
+                sliderFactorY.setValue(prefs.factorX, notify = false)
+                applyFactorLive(prefs.factorX, prefs.factorX)
+            }
+            LogBuffer.info("MainActivity", "lock X=Y -> $checked")
+        }
+        card.addRow(rowLockXY)
+        llSensitivity.addView(card)
     }
 
-    private companion object {
-        const val FACTOR_MAX_STEPS = 190 // 0.50 .. 10.00, step 0.05
+    /** Edge buffer / soft recenter / reanchor — all engine-side swipe fixes. */
+    private fun setupEdgeSettings() {
+        val card = SectionCard(this, getString(R.string.swipe_section))
+        val margin = LabeledSlider(
+            this, getString(R.string.edge_margin_label), 0f, 25f, 1f, prefs.edgeMarginPct.toFloat()
+        )
+        margin.onChange = { value, fromUser ->
+            if (fromUser) {
+                prefs.edgeMarginPct = value.roundToInt()
+                pushSensitivitySettings()
+            }
+        }
+        margin.onStopTracking = { pushSensitivitySettings() }
+        card.addRow(margin)
+
+        val soft = ToggleRow(this, getString(R.string.soft_recenter_label), prefs.softRecenter)
+        soft.onCheckedChange = { checked ->
+            prefs.softRecenter = checked
+            pushSensitivitySettings()
+        }
+        card.addRow(soft)
+
+        val reanchorWarning = TextView(this).apply {
+            text = getString(R.string.reanchor_warning)
+            setTextColor(0xFFD32F2F.toInt())
+            textSize = 10f
+            setPadding(0, 0, 0, 8)
+            visibility = if (prefs.reanchor) View.VISIBLE else View.GONE
+        }
+        val reanchor = ToggleRow(this, getString(R.string.reanchor_label), prefs.reanchor)
+        reanchor.onCheckedChange = { checked ->
+            prefs.reanchor = checked
+            reanchorWarning.visibility = if (checked) View.VISIBLE else View.GONE
+            pushSensitivitySettings()
+        }
+        card.addRow(reanchor)
+        card.addRow(reanchorWarning)
+        llSensitivity.addView(card, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = (8 * resources.displayMetrics.density).toInt() })
     }
 
     private fun applyFactorLive(x: Float, y: Float) {
         if (ShizukuHelper.service == null) return
-        if (prefs.enabled || testing) {
-            ShizukuHelper.setFactor(x, y)
+        if (!prefs.enabled && !testing) return
+        synchronized(factorLock) {
+            pendingFactorX = x
+            pendingFactorY = y
+            factorPending = true
+        }
+        val h = ensureEngineIo() ?: return
+        h.removeCallbacks(factorSendRunnable)
+        h.postDelayed(factorSendRunnable, 50L)
+    }
+
+    private fun pushSensitivitySettings() {
+        if (ShizukuHelper.service == null || (!prefs.enabled && !testing)) return
+        val margin = prefs.edgeMarginPct
+        val soft = prefs.softRecenter
+        val reanchor = prefs.reanchor
+        postEngineIo("push sensitivity settings") {
+            ShizukuHelper.setEdgeMargin(margin)
+            ShizukuHelper.setSoftRecenter(soft)
+            ShizukuHelper.setReanchor(reanchor)
         }
     }
 
-    private fun updateFactorLabels() {
-        tvFactorX.text = getString(R.string.factor_x_value, prefs.factorX)
-        tvFactorY.text = getString(R.string.factor_y_value, prefs.factorY)
+    private fun ensureEngineIo(): Handler? {
+        val existing = engineIoHandler
+        if (existing != null && engineIoThread?.isAlive == true) return existing
+        return try {
+            val t = HandlerThread("engine-io").also { it.start() }
+            engineIoThread = t
+            val h = Handler(t.looper)
+            engineIoHandler = h
+            h
+        } catch (t: Throwable) {
+            LogBuffer.error("MainActivity", "engine I/O thread failed", t)
+            engineIoThread = null
+            engineIoHandler = null
+            null
+        }
     }
 
-    private fun factorFromProgress(p: Int): Float {
-        val v = 0.5f + p * 0.05f
-        return (v * 100f).roundToInt() / 100f
-    }
-
-    private fun progressFromFactor(f: Float): Int {
-        return (((f - 0.5f) / 0.05f).roundToInt()).coerceIn(0, FACTOR_MAX_STEPS)
+    private fun postEngineIo(tag: String, block: () -> Unit) {
+        val h = ensureEngineIo() ?: return
+        h.post {
+            try {
+                block()
+            } catch (t: Throwable) {
+                LogBuffer.error("MainActivity", "$tag failed", t)
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -265,20 +361,6 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
     // ------------------------------------------------------------------
 
     private fun setupSwitches() {
-        swLock.setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
-            if (suppressSwitchCallbacks) return@setOnCheckedChangeListener
-            prefs.lockXY = checked
-            if (checked) {
-                prefs.factorY = prefs.factorX
-                suppressSeekCallbacks = true
-                sbY.progress = progressFromFactor(prefs.factorX)
-                suppressSeekCallbacks = false
-                updateFactorLabels()
-                applyFactorLive(prefs.factorX, prefs.factorX)
-            }
-            LogBuffer.info("MainActivity", "lock X=Y -> $checked")
-        }
-
         swEnable.setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
             if (suppressSwitchCallbacks) return@setOnCheckedChangeListener
             if (checked) requestEnable() else requestDisable("công tắc tắt")
@@ -391,8 +473,7 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
                 val fx = prefs.factorX
                 val fy = prefs.factorY
                 LogBuffer.info("MainActivity", "enabling engine X=$fx Y=$fy")
-                ShizukuHelper.setFactor(fx, fy)
-                ShizukuHelper.setEnabled(true)
+                enableEngineAsync(fx, fy)
                 prefs.enabled = true
                 enableInProgress = false
                 if (!prefs.runBackground && !prefs.onlyInSelectedApps) {
@@ -459,6 +540,45 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
                 startActivity(Intent(this, DebugLogActivity::class.java))
             }
             .show()
+    }
+
+    /**
+     * Rotation + engine settings + factors, in order, off the main thread.
+     * The shell process drops any config sent after a restart otherwise.
+     */
+    private fun enableEngineAsync(fx: Float, fy: Float) {
+        val rotation = currentRotation()
+        val margin = prefs.edgeMarginPct
+        val soft = prefs.softRecenter
+        val reanchor = prefs.reanchor
+        postEngineIo("engine enable") {
+            ShizukuHelper.setRotation(rotation)
+            ShizukuHelper.setEdgeMargin(margin)
+            ShizukuHelper.setSoftRecenter(soft)
+            ShizukuHelper.setReanchor(reanchor)
+            ShizukuHelper.setFactor(fx, fy)
+            ShizukuHelper.setEnabled(true)
+            LogBuffer.info("MainActivity", "engine enable sent (rotation=$rotation)")
+        }
+    }
+
+    private fun currentRotation(): Int = try {
+        val dm = getSystemService(DisplayManager::class.java)
+        dm?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: Surface.ROTATION_0
+    } catch (t: Throwable) {
+        Surface.ROTATION_0
+    }
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId != Display.DEFAULT_DISPLAY) return
+            val rotation = currentRotation()
+            LogBuffer.info("MainActivity", "display rotation changed -> $rotation")
+            postEngineIo("setRotation($rotation)") { ShizukuHelper.setRotation(rotation) }
+        }
     }
 
     private fun requestDisable(reason: String) {
@@ -531,8 +651,7 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
                 testing = true
                 testSecondsLeft = 10
                 prefs.enabled = false
-                ShizukuHelper.setFactor(prefs.factorX, prefs.factorY)
-                ShizukuHelper.setEnabled(true)
+                enableEngineAsync(prefs.factorX, prefs.factorY)
                 startActivityHeartbeat()
                 btnTest.text = getString(R.string.test_stop)
                 updateTestCountdown()
@@ -908,6 +1027,11 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
 
     override fun onStart() {
         super.onStart()
+        try {
+            getSystemService(DisplayManager::class.java)?.registerDisplayListener(displayListener, handler)
+        } catch (t: Throwable) {
+            LogBuffer.error("MainActivity", "registerDisplayListener failed", t)
+        }
         handler.post(statusRunnable)
         ShizukuHelper.addListener(this)
         ShizukuHelper.refreshState()
@@ -919,6 +1043,11 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
 
     override fun onStop() {
         super.onStop()
+        try {
+            getSystemService(DisplayManager::class.java)?.unregisterDisplayListener(displayListener)
+        } catch (t: Throwable) {
+            LogBuffer.error("MainActivity", "unregisterDisplayListener failed", t)
+        }
         handler.removeCallbacks(statusRunnable)
         if (prefs.enabled && !prefs.runBackground && !prefs.onlyInSelectedApps) {
             LogBuffer.info("MainActivity", "leaving app without background mode -> releasing")
@@ -936,6 +1065,10 @@ class MainActivity : Activity(), ShizukuHelper.Listener {
     override fun onDestroy() {
         ShizukuHelper.removeListener(this)
         handler.removeCallbacksAndMessages(null)
+        engineIoHandler?.removeCallbacksAndMessages(null)
+        engineIoThread?.quitSafely()
+        engineIoThread = null
+        engineIoHandler = null
         super.onDestroy()
     }
 

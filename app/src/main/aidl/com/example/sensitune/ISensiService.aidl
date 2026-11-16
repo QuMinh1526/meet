@@ -14,6 +14,29 @@ interface ISensiService {
     /** Realtime factor update; no lock, safe while the engine is running. */
     void setFactor(float x, float y);
 
+    /**
+     * Display.ROTATION_0..3. X = horizontal movement of the current screen, so
+     * portrait applies factorX to raw X and landscape applies it to raw Y.
+     * Factors are pinned per finger when its TRACKING_ID arrives.
+     */
+    void setRotation(int rotation);
+
+    /**
+     * true = forward touches unchanged (k=1.0, no soft recenter) while KEEPING
+     * the grab and the virtual device, so overlay sliders track the finger.
+     * Auto-expires after 10 s unless renewed.
+     */
+    void setScalingSuspended(boolean suspended);
+
+    /** Edge buffer as a percentage (0..25) of each raw axis length. */
+    void setEdgeMargin(int percent);
+
+    /** Soft recenter: fade the offset to 0 near a screen edge (default on). */
+    void setSoftRecenter(boolean enabled);
+
+    /** Optional lift + re-touch at the centre when the virtual point hits an edge. */
+    void setReanchor(boolean enabled);
+
     /** Must be sent at least every 3 seconds while the engine is active. */
     void heartbeat();
 

@@ -77,38 +77,13 @@
             android:text="@string/emergency_hint"
             android:textSize="11sp" />
 
-        <!-- Factors -->
-        <TextView
-            android:id="@+id/tvFactorX"
+        <!-- Factors: shared ui.kit widgets are inserted programmatically here. -->
+        <LinearLayout
+            android:id="@+id/llSensitivity"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
-            android:text="@string/factor_x_default"
-            android:textSize="15sp" />
-
-        <SeekBar
-            android:id="@+id/sbFactorX"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
-
-        <TextView
-            android:id="@+id/tvFactorY"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/factor_y_default"
-            android:textSize="15sp" />
-
-        <SeekBar
-            android:id="@+id/sbFactorY"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
-
-        <Switch
-            android:id="@+id/swLockXY"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/lock_xy"
-            android:checked="true" />
+            android:orientation="vertical" />
 
         <TextView
             android:layout_width="match_parent"

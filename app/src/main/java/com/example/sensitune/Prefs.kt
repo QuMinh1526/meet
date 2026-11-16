@@ -25,6 +25,21 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_LOCK_XY, true)
         set(value) = sp.edit().putBoolean(KEY_LOCK_XY, value).apply()
 
+    /** Edge buffer in percent of each raw axis length (0..25). */
+    var edgeMarginPct: Int
+        get() = sp.getInt(KEY_EDGE_MARGIN, 12).coerceIn(0, 25)
+        set(value) = sp.edit().putInt(KEY_EDGE_MARGIN, value.coerceIn(0, 25)).apply()
+
+    /** Fade the virtual offset to 0 near an edge so a swipe can turn around. */
+    var softRecenter: Boolean
+        get() = sp.getBoolean(KEY_SOFT_RECENTER, true)
+        set(value) = sp.edit().putBoolean(KEY_SOFT_RECENTER, value).apply()
+
+    /** Optional lift + re-touch at the centre when the virtual point hits an edge. */
+    var reanchor: Boolean
+        get() = sp.getBoolean(KEY_REANCHOR, false)
+        set(value) = sp.edit().putBoolean(KEY_REANCHOR, value).apply()
+
     /** Desired state. Persisted only to show the correct UI; engine never auto-starts. */
     var enabled: Boolean
         get() = sp.getBoolean(KEY_ENABLED, false)
@@ -221,6 +236,9 @@ class Prefs(context: Context) {
         const val KEY_X = "factor_x"
         const val KEY_Y = "factor_y"
         const val KEY_LOCK_XY = "lock_xy"
+        const val KEY_EDGE_MARGIN = "edge_margin_pct"
+        const val KEY_SOFT_RECENTER = "soft_recenter"
+        const val KEY_REANCHOR = "reanchor"
         const val KEY_ENABLED = "enabled"
         const val KEY_RUN_BACKGROUND = "run_background"
         const val KEY_ONLY_IN_APPS = "only_in_apps"

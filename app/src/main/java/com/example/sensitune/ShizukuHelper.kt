@@ -356,6 +356,33 @@ object ShizukuHelper {
         return service != null
     }
 
+    /** Display.ROTATION_0..3. Must be called off the main thread. */
+    fun setRotation(rotation: Int): Boolean {
+        call("setRotation", Unit) { it.setRotation(rotation) }
+        return service != null
+    }
+
+    /** true keeps the grab but forwards touches unchanged (overlay gestures). */
+    fun setScalingSuspended(suspended: Boolean): Boolean {
+        call("setScalingSuspended", Unit) { it.setScalingSuspended(suspended) }
+        return service != null
+    }
+
+    fun setEdgeMargin(percent: Int): Boolean {
+        call("setEdgeMargin", Unit) { it.setEdgeMargin(percent) }
+        return service != null
+    }
+
+    fun setSoftRecenter(enabled: Boolean): Boolean {
+        call("setSoftRecenter", Unit) { it.setSoftRecenter(enabled) }
+        return service != null
+    }
+
+    fun setReanchor(enabled: Boolean): Boolean {
+        call("setReanchor", Unit) { it.setReanchor(enabled) }
+        return service != null
+    }
+
     fun heartbeat() {
         val s = service ?: return
         try {

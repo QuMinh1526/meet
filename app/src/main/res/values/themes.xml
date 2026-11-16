@@ -7,4 +7,14 @@
         <item name="android:statusBarColor">#0D47A1</item>
         <item name="android:windowBackground">#FFFDFDFD</item>
     </style>
+
+    <!-- Overlay windows are dark; Switch/SeekBar only render correctly when the
+         ContextThemeWrapper carries this theme (not the app's light theme). -->
+    <style name="Theme.SensiTune.Overlay" parent="@android:style/Theme.Material">
+        <item name="android:colorAccent">#4FC3F7</item>
+        <item name="android:colorControlActivated">#4FC3F7</item>
+        <item name="android:windowBackground">#263238</item>
+        <item name="android:textColorPrimary">#FFFFFF</item>
+        <item name="android:textColorSecondary">#B0BEC5</item>
+    </style>
 </resources>

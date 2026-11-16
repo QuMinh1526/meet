@@ -127,6 +127,70 @@ class SensiUserService(private val context: Context) : ISensiService.Stub() {
         }
     }
 
+    override fun setRotation(rotation: Int) {
+        synchronized(lock) {
+            if (!ensureLib()) return
+            try {
+                val code = NativeBridge.setRotation(rotation)
+                if (code != NativeBridge.OK) {
+                    LogBuffer.warn(
+                        TAG,
+                        "setRotation($rotation) rejected: ${NativeBridge.errorMessage(code)}"
+                    )
+                }
+            } catch (t: Throwable) {
+                LogBuffer.error(TAG, "setRotation exception", t)
+            }
+        }
+    }
+
+    override fun setScalingSuspended(suspended: Boolean) {
+        synchronized(lock) {
+            if (!ensureLib()) return
+            try {
+                NativeBridge.setScalingSuspended(suspended)
+            } catch (t: Throwable) {
+                LogBuffer.error(TAG, "setScalingSuspended exception", t)
+            }
+        }
+    }
+
+    override fun setEdgeMargin(percent: Int) {
+        synchronized(lock) {
+            if (!ensureLib()) return
+            try {
+                val code = NativeBridge.setEdgeMargin(percent)
+                if (code != NativeBridge.OK) {
+                    LogBuffer.warn(TAG, "setEdgeMargin($percent) rejected")
+                }
+            } catch (t: Throwable) {
+                LogBuffer.error(TAG, "setEdgeMargin exception", t)
+            }
+        }
+    }
+
+    override fun setSoftRecenter(enabled: Boolean) {
+        synchronized(lock) {
+            if (!ensureLib()) return
+            try {
+                NativeBridge.setSoftRecenter(enabled)
+            } catch (t: Throwable) {
+                LogBuffer.error(TAG, "setSoftRecenter exception", t)
+            }
+        }
+    }
+
+    override fun setReanchor(enabled: Boolean) {
+        synchronized(lock) {
+            if (!ensureLib()) return
+            try {
+                NativeBridge.setReanchor(enabled)
+            } catch (t: Throwable) {
+                LogBuffer.error(TAG, "setReanchor exception", t)
+            }
+        }
+    }
+
     override fun heartbeat() {
         if (!libLoaded) return
         try {

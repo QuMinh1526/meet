@@ -31,6 +31,13 @@ int sensi_start(void);
 int sensi_stop(const char *reason);
 int sensi_set_enabled(int enabled);
 int sensi_set_factor(float x, float y);
+/* Display rotation as Display.ROTATION_0..3 (portrait 0/2, landscape 1/3). */
+int sensi_set_rotation(int rotation);
+/* true = forward events unchanged (k=1.0, no soft recenter) for overlay gestures. */
+int sensi_set_scaling_suspended(int suspended);
+int sensi_set_edge_margin(int percent);
+int sensi_set_soft_recenter(int enabled);
+int sensi_set_reanchor(int enabled);
 int sensi_heartbeat(void);
 int sensi_emergency_release(const char *reason);
 char *sensi_get_status_json(void);

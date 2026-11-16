@@ -137,6 +137,35 @@ static std::atomic<bool> g_grab_active{false};
 static std::atomic<bool> g_ui_destroyed{false};
 static std::atomic<float> g_kx{1.0f};
 static std::atomic<float> g_ky{1.0f};
+
+// Rotation of the display as Display.ROTATION_0..3. Raw coordinates never change
+// with rotation (they are tied to the portrait panel), so the meaning of the
+// user's X/Y factors swaps on landscape orientations. Factors are pinned per
+// slot when a new TRACKING_ID arrives.
+static std::atomic<int> g_rotation{0};
+static std::atomic<bool> g_rotation_known{false};
+
+// While suspended (floating menu open) events are forwarded unchanged but the
+// grab and virtual device stay intact. Fails safe after 10s without renewal.
+static std::atomic<bool> g_scaling_suspended{false};
+static std::atomic<int64_t> g_suspend_until_ms{0};
+
+// Edge buffer as a percentage of each raw axis length (not shared pixels: raw X
+// is 0..1079 while raw Y is 0..2399 on the reference device).
+static std::atomic<int> g_edge_margin_pct{12};
+static std::atomic<bool> g_soft_recenter{true};
+static std::atomic<bool> g_reanchor{false};
+
+static std::atomic<uint64_t> g_clamp_x{0};
+static std::atomic<uint64_t> g_clamp_y{0};
+static std::atomic<uint64_t> g_reanchor_count{0};
+static std::atomic<uint64_t> g_axis_events_x{0};
+static std::atomic<uint64_t> g_axis_events_y{0};
+static std::atomic<uint64_t> g_offset_sum_x{0};   // milli-units of |virt-raw|
+static std::atomic<uint64_t> g_offset_sum_y{0};
+static std::atomic<uint64_t> g_offset_max_x{0};
+static std::atomic<uint64_t> g_offset_max_y{0};
+static std::atomic<int> g_next_tracking_id{1000};
 static std::atomic<int64_t> g_last_heartbeat_ms{0};
 static std::atomic<int64_t> g_last_loop_ms{0};
 static std::atomic<int64_t> g_started_ms{0};
@@ -1121,31 +1150,172 @@ struct SlotState {
     float virt_x = 0.0f;
     float virt_y = 0.0f;
     int tracking_id = -1;
+    // Pinned when this finger goes down: rotation/suspend changes apply to the
+    // next new finger, never to a finger that is already touching.
+    float k_raw_x = 1.0f;
+    float k_raw_y = 1.0f;
+    bool soft = true;
+    bool suspended = false;
+    int synth_tracking_id = 0;
+    int64_t last_reanchor_ms = 0;
 };
 
 static SlotState g_slots[MAX_SLOTS];
 static int g_current_slot = 0;
 static bool g_btn_touch_down = false;
 
-// Keep injected touches out of the outermost ~1% of each axis. Touches exactly
-// on the display edge can land in a system gesture zone / rounded-corner inset,
-// where the app never sees them: the cursor then appears stuck in that corner
-// until the finger moves back inside. This is a hard safety margin, not a
-// scaling change: with factor 1.0 the shift is only a few pixels.
-static int g_edge_x = 0;
-static int g_edge_y = 0;
-
-static int edge_margin(int lo, int hi) {
+/*
+ * Edge buffer of one RAW axis: edgeMargin% of that axis' own length. Raw X is
+ * 0..1079 while raw Y is 0..2399 on the reference panel, so a shared pixel
+ * threshold would be wrong. The buffer feeds soft recenter only; the hard clamp
+ * always stays the full [min,max].
+ */
+static inline float axis_margin(int lo, int hi) {
     int range = hi - lo;
-    if (range <= 0) return 0;
-    int m = range / 100;
-    return m < 1 ? 1 : m;
+    if (range <= 0) return 0.0f;
+    int pct = g_edge_margin_pct.load(std::memory_order_relaxed);
+    if (pct <= 0) return 0.0f;
+    if (pct > 25) pct = 25;
+    return (float) range * (float) pct / 100.0f;
 }
 
 static inline int clamp_int(int v, int lo, int hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+static void record_axis_stats(std::atomic<uint64_t> &sum, std::atomic<uint64_t> &mx,
+                              std::atomic<uint64_t> &events, float offset) {
+    uint64_t milli = (uint64_t) (std::fabs(offset) * 1000.0f);
+    sum.fetch_add(milli);
+    events.fetch_add(1);
+    uint64_t prev = mx.load();
+    while (milli > prev && !mx.compare_exchange_weak(prev, milli)) {
+    }
+}
+
+/*
+ * Locks the factors for a finger when its TRACKING_ID arrives. rotation 0/2 is
+ * portrait (raw X = horizontal), 1/3 is landscape (raw X = vertical), so the
+ * user's horizontal factor must be applied to raw Y there. The suspend flag is
+ * pinned too: forwarding unchanged only affects fingers that start afterwards.
+ */
+static void pin_slot_config(SlotState &s) {
+    int rot = g_rotation.load(std::memory_order_relaxed);
+    bool suspended = g_scaling_suspended.load(std::memory_order_relaxed);
+    float fx = g_kx.load(std::memory_order_relaxed);
+    float fy = g_ky.load(std::memory_order_relaxed);
+    if (suspended) {
+        fx = 1.0f;
+        fy = 1.0f;
+    }
+    bool landscape = (rot == 1 || rot == 3);
+    s.k_raw_x = landscape ? fy : fx;
+    s.k_raw_y = landscape ? fx : fy;
+    s.suspended = suspended;
+    s.soft = !suspended && g_soft_recenter.load(std::memory_order_relaxed);
+    s.synth_tracking_id = 0;
+}
+
+/*
+ * One raw axis step. virt is kept as a float (sub-pixel); it is rounded only when
+ * written out. When the virtual position enters the edge buffer AND the offset
+ * pushes it towards that edge, the offset is faded linearly to zero so virt
+ * rejoins raw at the edge instead of sticking there while the finger keeps
+ * moving. Away from the edge the offset accumulates normally again.
+ */
+static bool scale_axis(SlotState &s, bool is_x, int raw, float *virt, int lo, int hi,
+                       bool *pending, int *last_raw) {
+    if (*pending) {
+        *virt = (float) clamp_int(raw, lo, hi);
+        *pending = false;
+        *last_raw = raw;
+        return false;
+    }
+
+    float k = is_x ? s.k_raw_x : s.k_raw_y;
+    *virt += (float) (raw - *last_raw) * k;
+    *last_raw = raw;
+
+    if (s.soft && !s.suspended) {
+        float m = axis_margin(lo, hi);
+        if (m > 0.0f) {
+            float off = *virt - (float) raw;
+            float d_lo = *virt - (float) lo;
+            float d_hi = (float) hi - *virt;
+            if (d_lo < m && off < 0.0f) {
+                *virt = (float) raw + off * (std::fmaxf(d_lo, 0.0f) / m);
+            } else if (d_hi < m && off > 0.0f) {
+                *virt = (float) raw + off * (std::fmaxf(d_hi, 0.0f) / m);
+            }
+        }
+    }
+
+    bool clamped = false;
+    if (*virt < (float) lo) {
+        *virt = (float) lo;
+        clamped = true;
+    } else if (*virt > (float) hi) {
+        *virt = (float) hi;
+        clamped = true;
+    }
+    return clamped;
+}
+
+static void push_event(std::vector<struct input_event> *out, int type, int code, int value) {
+    struct input_event e = {};
+    e.type = (uint16_t) type;
+    e.code = (uint16_t) code;
+    e.value = value;
+    out->push_back(e);
+}
+
+/*
+ * Optional "reanchor": lift the finger and touch down again in the middle. The
+ * game may count this as a brand new touch, which is why it is off by default.
+ */
+static void build_reanchor_events(std::vector<struct input_event> *out, int slot,
+                                  int safe_x, int safe_y) {
+    push_event(out, EV_ABS, ABS_MT_SLOT, slot);
+    push_event(out, EV_ABS, ABS_MT_TRACKING_ID, -1);
+    push_event(out, EV_KEY, BTN_TOUCH, 0);
+    push_event(out, EV_SYN, SYN_REPORT, 0);
+    push_event(out, EV_ABS, ABS_MT_SLOT, slot);
+    push_event(out, EV_ABS, ABS_MT_TRACKING_ID, g_next_tracking_id.fetch_add(1));
+    push_event(out, EV_KEY, BTN_TOUCH, 1);
+    push_event(out, EV_ABS, ABS_MT_POSITION_X, safe_x);
+    push_event(out, EV_ABS, ABS_MT_POSITION_Y, safe_y);
+    push_event(out, EV_SYN, SYN_REPORT, 0);
+}
+
+/*
+ * Reanchors at most once per second per slot. The re-touch uses the safe centre
+ * of the panel and is emitted before the current (dropped) position event.
+ */
+static bool try_reanchor(SlotState &s, int slot, int raw_x,
+                         std::vector<struct input_event> *extra, bool is_x,
+                         float *virt_axis) {
+    (void) raw_x;
+    (void) is_x;
+    (void) virt_axis;
+    if (!g_reanchor.load(std::memory_order_relaxed) || s.suspended) return false;
+    int64_t now = now_ms();
+    if (now - s.last_reanchor_ms < 1000) return false;
+    s.last_reanchor_ms = now;
+
+    int safe_x = (g_abs_min_x + g_abs_max_x) / 2;
+    int safe_y = (g_abs_min_y + g_abs_max_y) / 2;
+    s.virt_x = (float) safe_x;
+    s.virt_y = (float) safe_y;
+    s.pending_init_x = false;
+    s.pending_init_y = false;
+    build_reanchor_events(extra, slot, safe_x, safe_y);
+    g_reanchor_count.fetch_add(1);
+    LOGW("reanchor slot %d after edge clamp -> touch again at (%d,%d); the game "
+         "may see this as a new touch",
+         slot, safe_x, safe_y);
+    return true;
 }
 
 static void reset_slot(int slot) {
@@ -1252,7 +1422,13 @@ static void flush_packet(const std::vector<struct input_event> &packet,
     }
 }
 
-static void handle_abs_event(struct input_event *ev) {
+/*
+ * Mutates the ABS event in place. Returns false when the event must not be
+ * forwarded (its replacement reanchor sequence is in extra). extra always
+ * receives any synthetic events that have to be emitted first.
+ */
+static bool handle_abs_event(struct input_event *ev,
+                             std::vector<struct input_event> *extra) {
     int slot = g_current_slot;
     bool valid = slot >= 0 && slot < MAX_SLOTS;
 
@@ -1265,10 +1441,10 @@ static void handle_abs_event(struct input_event *ev) {
             } else {
                 g_current_slot = ev->value;
             }
-            return;
+            return true;
         }
         case ABS_MT_TRACKING_ID: {
-            if (!valid) return;
+            if (!valid) return true;
             SlotState &s = g_slots[slot];
             if (ev->value < 0) {
                 s.active = false;
@@ -1280,55 +1456,48 @@ static void handle_abs_event(struct input_event *ev) {
                 s.tracking_id = ev->value;
                 s.pending_init_x = true;
                 s.pending_init_y = true;
+                pin_slot_config(s);
+                LOGD("slot %d tracking id %d: kRawX=%.2f kRawY=%.2f rotation=%d "
+                     "suspend=%d soft=%d",
+                     slot, ev->value, s.k_raw_x, s.k_raw_y, g_rotation.load(),
+                     s.suspended ? 1 : 0, s.soft ? 1 : 0);
             }
-            return;
+            return true;
         }
         case ABS_MT_POSITION_X: {
-            if (!valid) return;
+            if (!valid) return true;
             SlotState &s = g_slots[slot];
             int raw = ev->value;
-            if (!s.active) return; // no active finger: forward unchanged
-            if (s.pending_init_x) {
-                int mx = (g_kx.load(std::memory_order_relaxed) != 1.0f) ? g_edge_x : 0;
-                s.virt_x = (float) clamp_int(raw, g_abs_min_x + mx,
-                                          g_abs_max_x - mx);
-                s.pending_init_x = false;
-            } else {
-                float k = g_kx.load(std::memory_order_relaxed);
-                int mx = (k != 1.0f) ? g_edge_x : 0;
-                s.virt_x += (float) (raw - s.last_raw_x) * k;
-                s.virt_x = std::fmaxf((float) (g_abs_min_x + mx),
-                                      std::fminf((float) (g_abs_max_x - mx),
-                                                 s.virt_x));
+            if (!s.active) return true; // no active finger: forward unchanged
+            bool clamped = scale_axis(s, true, raw, &s.virt_x, g_abs_min_x,
+                                      g_abs_max_x, &s.pending_init_x, &s.last_raw_x);
+            record_axis_stats(g_offset_sum_x, g_offset_max_x, g_axis_events_x,
+                              s.virt_x - (float) raw);
+            if (clamped) {
+                g_clamp_x.fetch_add(1);
+                if (try_reanchor(s, slot, raw, extra, true, &s.virt_x)) return false;
             }
-            s.last_raw_x = raw;
             ev->value = (int) lroundf(s.virt_x);
-            return;
+            return true;
         }
         case ABS_MT_POSITION_Y: {
-            if (!valid) return;
+            if (!valid) return true;
             SlotState &s = g_slots[slot];
             int raw = ev->value;
-            if (!s.active) return;
-            if (s.pending_init_y) {
-                int my = (g_ky.load(std::memory_order_relaxed) != 1.0f) ? g_edge_y : 0;
-                s.virt_y = (float) clamp_int(raw, g_abs_min_y + my,
-                                          g_abs_max_y - my);
-                s.pending_init_y = false;
-            } else {
-                float k = g_ky.load(std::memory_order_relaxed);
-                int my = (k != 1.0f) ? g_edge_y : 0;
-                s.virt_y += (float) (raw - s.last_raw_y) * k;
-                s.virt_y = std::fmaxf((float) (g_abs_min_y + my),
-                                      std::fminf((float) (g_abs_max_y - my),
-                                                 s.virt_y));
+            if (!s.active) return true;
+            bool clamped = scale_axis(s, false, raw, &s.virt_y, g_abs_min_y,
+                                      g_abs_max_y, &s.pending_init_y, &s.last_raw_y);
+            record_axis_stats(g_offset_sum_y, g_offset_max_y, g_axis_events_y,
+                              s.virt_y - (float) raw);
+            if (clamped) {
+                g_clamp_y.fetch_add(1);
+                if (try_reanchor(s, slot, raw, extra, false, &s.virt_y)) return false;
             }
-            s.last_raw_y = raw;
             ev->value = (int) lroundf(s.virt_y);
-            return;
+            return true;
         }
         default:
-            return;
+            return true;
     }
 }
 
@@ -1402,8 +1571,14 @@ static void reader_loop() {
                     continue;
                 }
 
+                std::vector<struct input_event> reanchor_events;
+                bool forward = true;
                 if (ev.type == EV_ABS) {
-                    handle_abs_event(&ev);
+                    forward = handle_abs_event(&ev, &reanchor_events);
+                    for (const auto &extra_ev : reanchor_events) {
+                        packet.push_back(extra_ev);
+                    }
+                    if (!forward) continue;
                 } else if (ev.type == EV_KEY && ev.code == BTN_TOUCH) {
                     g_btn_touch_down = ev.value != 0;
                     if (!g_btn_touch_down) {
@@ -1461,10 +1636,23 @@ static void watchdog_loop() {
         usleep(200 * 1000);
         if (g_stop.load()) break;
 
+        int64_t now = now_ms();
+
+        // The menu renews suspension every ~2 s while it is open. If it stops
+        // (menu closed/crashed), scaling comes back on its own after 10 s.
+        if (g_scaling_suspended.load()) {
+            int64_t until = g_suspend_until_ms.load();
+            if (until > 0 && now >= until) {
+                g_scaling_suspended.store(false);
+                g_suspend_until_ms.store(0);
+                LOGW("scaling suspension expired after 10 s without renewal - "
+                     "factors apply to the next new finger");
+            }
+        }
+
         int state = g_state.load();
         if (state != STATE_ACTIVE && state != STATE_READY) continue;
 
-        int64_t now = now_ms();
         int64_t loop_age = now - g_last_loop_ms.load();
         if (loop_age > 1000) {
             LOGE("WATCHDOG: event loop stalled for %lld ms - releasing grab",
@@ -1479,6 +1667,8 @@ static void watchdog_loop() {
         if (hb_age > 3000) {
             LOGW("WATCHDOG: no heartbeat for %lld ms - releasing grab and going IDLE",
                  (long long) hb_age);
+            g_scaling_suspended.store(false);
+            g_suspend_until_ms.store(0);
             safety_release("heartbeat timeout");
             g_state.store(STATE_IDLE);
             break;
@@ -1498,6 +1688,24 @@ static void watchdog_loop() {
                  (unsigned long long) avg,
                  (unsigned long long) g_latency_max_us.load(),
                  (unsigned long long) g_events_per_sec.load());
+            uint64_t ex = g_axis_events_x.load();
+            uint64_t ey = g_axis_events_y.load();
+            LOGI("swipe stats: clampX=%llu clampY=%llu offsetX avg=%.1f max=%.1f "
+                 "offsetY avg=%.1f max=%.1f rotation=%d suspend=%d reanchors=%llu",
+                 (unsigned long long) g_clamp_x.load(),
+                 (unsigned long long) g_clamp_y.load(),
+                 ex ? (double) g_offset_sum_x.load() / (double) ex / 1000.0 : 0.0,
+                 (double) g_offset_max_x.load() / 1000.0,
+                 ey ? (double) g_offset_sum_y.load() / (double) ey / 1000.0 : 0.0,
+                 (double) g_offset_max_y.load() / 1000.0,
+                 g_rotation.load(), g_scaling_suspended.load() ? 1 : 0,
+                 (unsigned long long) g_reanchor_count.load());
+            g_offset_sum_x.store(0);
+            g_offset_sum_y.store(0);
+            g_offset_max_x.store(0);
+            g_offset_max_y.store(0);
+            g_axis_events_x.store(0);
+            g_axis_events_y.store(0);
         }
     }
     LOGI("watchdog thread exiting");
@@ -1610,11 +1818,21 @@ int sensi_start(void) {
     g_abs_max_x = src.max_x;
     g_abs_min_y = src.min_y;
     g_abs_max_y = src.max_y;
-    g_edge_x = edge_margin(g_abs_min_x, g_abs_max_x);
-    g_edge_y = edge_margin(g_abs_min_y, g_abs_max_y);
-    LOGI("virtual touch edge margin: x=%d y=%d raw units (keeps touches out of system "
-         "gesture/corner inset so swipes cannot stick in a screen corner)",
-         g_edge_x, g_edge_y);
+    // Edge buffer is a percentage of each raw axis length, never shared pixels.
+    float margin_x = axis_margin(g_abs_min_x, g_abs_max_x);
+    float margin_y = axis_margin(g_abs_min_y, g_abs_max_y);
+    LOGI("edge margin %d%%: x=%.0f raw units (length %d), y=%.0f raw units (length %d)",
+         g_edge_margin_pct.load(), margin_x, g_abs_max_x - g_abs_min_x, margin_y,
+         g_abs_max_y - g_abs_min_y);
+    if (!g_rotation_known.load()) {
+        LOGW("display rotation unknown - assuming ROTATION_0; X/Y factors may be swapped "
+             "until setRotation() arrives");
+    }
+    if (g_scaling_suspended.load()) {
+        LOGW("engine started while scaling is suspended - forwarding unchanged (k=1.0)");
+    }
+    // MT-A devices may never deliver a TRACKING_ID, so slot 0 gets its config now.
+    pin_slot_config(g_slots[0]);
     g_max_slots.store(src.max_slots);
     g_has_slot_axis.store(src.has_slot_axis);
     snprintf(g_device_path, sizeof(g_device_path), "%s", src.path.c_str());
@@ -1668,6 +1886,15 @@ int sensi_start(void) {
     g_latency_sum_us.store(0);
     g_latency_max_us.store(0);
     g_events_per_sec.store(0);
+    g_clamp_x.store(0);
+    g_clamp_y.store(0);
+    g_reanchor_count.store(0);
+    g_offset_sum_x.store(0);
+    g_offset_sum_y.store(0);
+    g_offset_max_x.store(0);
+    g_offset_max_y.store(0);
+    g_axis_events_x.store(0);
+    g_axis_events_y.store(0);
 
     g_watchdog_thread = std::thread(watchdog_loop);
     g_key_thread = std::thread(key_loop);
@@ -1734,6 +1961,76 @@ int sensi_set_factor(float x, float y) {
     return SENSI_OK;
 }
 
+/*
+ * Display.ROTATION_0..3. Factors are pinned per finger when its TRACKING_ID
+ * arrives, so a finger already touching keeps the configuration it started with.
+ */
+int sensi_set_rotation(int rotation) {
+    if (rotation < 0 || rotation > 3) {
+        LOGW("set_rotation rejected: %d (valid 0..3)", rotation);
+        return SENSI_ERR_BAD_ARG;
+    }
+    int previous = g_rotation.exchange(rotation);
+    bool was_known = g_rotation_known.exchange(true);
+    if (!was_known || previous != rotation) {
+        LOGI("display rotation %s: %d -> %d (%s)", was_known ? "changed" : "known",
+             previous, rotation,
+             (rotation == 1 || rotation == 3) ? "landscape: raw X gets factorY"
+                                             : "portrait: raw X gets factorX");
+    }
+    return SENSI_OK;
+}
+
+/*
+ * Suspends scaling (k=1.0, no soft recenter) but keeps the grab and the virtual
+ * device alive, so overlay gestures reach the app untouched. Auto-expires after
+ * 10 s unless the caller renews it, and is cleared on heartbeat timeout.
+ */
+int sensi_set_scaling_suspended(int suspended) {
+    if (suspended) {
+        bool was = g_scaling_suspended.exchange(true);
+        g_suspend_until_ms.store(now_ms() + 10000);
+        if (!was) LOGI("scaling suspended: forwarding unchanged (k=1.0), grab stays active");
+    } else {
+        bool was = g_scaling_suspended.exchange(false);
+        g_suspend_until_ms.store(0);
+        if (was) LOGI("scaling resumed: factors apply to the next new finger");
+    }
+    return SENSI_OK;
+}
+
+int sensi_set_edge_margin(int percent) {
+    if (percent < 0 || percent > 25) {
+        LOGE("set_edge_margin rejected: %d%% (valid 0..25)", percent);
+        return SENSI_ERR_BAD_ARG;
+    }
+    int old = g_edge_margin_pct.exchange(percent);
+    if (old != percent) {
+        LOGI("edge margin %d%% -> %d%% (per raw axis length; X needs %.0f units, Y needs "
+             "%.0f units at current ranges)",
+             old, percent, axis_margin(g_abs_min_x, g_abs_max_x),
+             axis_margin(g_abs_min_y, g_abs_max_y));
+    }
+    return SENSI_OK;
+}
+
+int sensi_set_soft_recenter(int enabled) {
+    bool old = g_soft_recenter.exchange(enabled != 0);
+    if (old != (enabled != 0)) {
+        LOGI("soft recenter %s (applies to the next new finger)", enabled ? "ON" : "OFF");
+    }
+    return SENSI_OK;
+}
+
+int sensi_set_reanchor(int enabled) {
+    bool old = g_reanchor.exchange(enabled != 0);
+    if (old != (enabled != 0)) {
+        LOGW("reanchor %s (at most once per second per finger; games may treat it as "
+             "a new touch)", enabled ? "ON" : "OFF");
+    }
+    return SENSI_OK;
+}
+
 int sensi_heartbeat(void) {
     g_last_heartbeat_ms.store(now_ms());
     return SENSI_OK;
@@ -1771,6 +2068,9 @@ char *sensi_get_status_json(void) {
              "\"eventsWritten\":%llu,\"eventsPerSec\":%llu,\"latencyAvgUs\":%llu,"
              "\"latencyMaxUs\":%llu,\"packetsDropped\":%llu,\"eagain\":%llu,"
              "\"lastHeartbeatAgoMs\":%lld,\"uptimeMs\":%lld,\"lastErrorCode\":%d,"
+             "\"rotation\":%d,\"rotationKnown\":%s,\"suspended\":%s,"
+             "\"edgeMarginPct\":%d,\"softRecenter\":%s,\"reanchor\":%s,"
+             "\"clampX\":%llu,\"clampY\":%llu,\"reanchors\":%llu,"
              "\"lastError\":\"%s\"}",
              state_name(g_state.load()),
              g_state.load() == STATE_ACTIVE ? "true" : "false",
@@ -1789,6 +2089,15 @@ char *sensi_get_status_json(void) {
              (long long) hb_age,
              (long long) (g_started_ms.load() > 0 ? now - g_started_ms.load() : 0),
              g_last_error_code.load(),
+             g_rotation.load(),
+             g_rotation_known.load() ? "true" : "false",
+             g_scaling_suspended.load() ? "true" : "false",
+             g_edge_margin_pct.load(),
+             g_soft_recenter.load() ? "true" : "false",
+             g_reanchor.load() ? "true" : "false",
+             (unsigned long long) g_clamp_x.load(),
+             (unsigned long long) g_clamp_y.load(),
+             (unsigned long long) g_reanchor_count.load(),
              json_escape(err).c_str());
 
     char *out = (char *) malloc(strlen(buf) + 1);
@@ -1960,6 +2269,32 @@ Java_com_example_sensitune_NativeBridge_setEnabled(JNIEnv *, jclass, jboolean en
 JNIEXPORT jint JNICALL
 Java_com_example_sensitune_NativeBridge_setFactor(JNIEnv *, jclass, jfloat x, jfloat y) {
     return sensi_set_factor(x, y);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_example_sensitune_NativeBridge_setRotation(JNIEnv *, jclass, jint rotation) {
+    return sensi_set_rotation(rotation);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_example_sensitune_NativeBridge_setScalingSuspended(JNIEnv *, jclass,
+                                                            jboolean suspended) {
+    return sensi_set_scaling_suspended(suspended ? 1 : 0);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_example_sensitune_NativeBridge_setEdgeMargin(JNIEnv *, jclass, jint percent) {
+    return sensi_set_edge_margin(percent);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_example_sensitune_NativeBridge_setSoftRecenter(JNIEnv *, jclass, jboolean enabled) {
+    return sensi_set_soft_recenter(enabled ? 1 : 0);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_example_sensitune_NativeBridge_setReanchor(JNIEnv *, jclass, jboolean enabled) {
+    return sensi_set_reanchor(enabled ? 1 : 0);
 }
 
 JNIEXPORT jint JNICALL

@@ -43,9 +43,21 @@ Native engine, mỗi event:
    `UI_DEV_CREATE` (kèm inotify, poll tối đa 1 s), (c) mở node mới và `EVIOCGNAME` khớp tên ảo;
    một cách thành công là đủ — chỉ sau đó mới `EVIOCGRAB`, nếu không thì `UI_DEV_DESTROY`;
 4. đọc bằng `poll()` timeout 100 ms, gom đến `SYN_REPORT` rồi `write()` một lần;
-5. mỗi slot: `virt = raw` khi chạm xuống, `virt += (raw-last_raw)*k` khi di chuyển,
-   clamp `[min,max]`, reset khi nhấc; mọi event khác (pressure, major, BTN_TOUCH, SYN) giữ nguyên;
-6. `k` đọc bằng `std::atomic<float>` — đổi realtime, không khoá.
+5. mỗi slot: `virt = raw` khi chạm xuống, `virt += (raw-last_raw)*k` khi di chuyển, clamp `[min,max]`
+   (full range, raw ở mép thì virt cũng ở mép), reset khi nhấc; mọi event khác (pressure, major,
+   BTN_TOUCH, SYN) giữ nguyên;
+6. hệ số được **chốt cho từng ngón** khi slot nhận `TRACKING_ID` mới. Rotation 0/2 (dọc):
+   `kRawX=factorX, kRawY=factorY`; rotation 1/3 (ngang): `kRawX=factorY, kRawY=factorX`.
+   Xoay giữa lúc đang chạm thì ngón cũ giữ cấu hình đã chốt, ngón mới dùng cấu hình mới;
+7. **soft recenter**: offset `virt-raw` được theo dõi riêng từng trục thô. Vùng đệm
+   `M = edgeMargin% × chiều dài trục đó` (X thô ngắn hơn Y thô nên không dùng chung ngưỡng px).
+   Khi `virt` vào vùng đệm và offset đang đẩy về mép, offset giảm tuyến tính về 0 (sát mép
+   `virt = raw`); ra xa mép offset tích luỹ lại. Không nhảy vọt, mỗi frame `virt` liên tục.
+   Tuỳ chọn **reanchor** (mặc định tắt, tối đa 1 lần/giây/ngón) gửi `TRACKING_ID=-1` rồi chạm
+   lại ở giữa — game có thể coi đó là lần chạm mới;
+8. hệ số đọc bằng `std::atomic<float>` — đổi realtime, không khoá. `setScalingSuspended(true)`
+   chuyển tiếp nguyên bản (k=1.0, tắt soft recenter) nhưng **vẫn grab**; tự hết hạn sau 10 giây
+   nếu menu không gia hạn, và tắt khi heartbeat timeout.
 
 ### Cây thư mục
 
@@ -72,6 +84,15 @@ app/src/main/java/com/example/sensitune/
     FloatMenu.kt             # nút tròn + bảng 2 tab Độ nhạy/HUD
     PerfSampler.kt           # đọc thermal/CPU/FPS trong tiến trình shell
     OverlayUi.kt             # quyền overlay, kích thước màn hình, view phụ trợ
+    ui/kit/                  # bộ widget dùng chung (Context thường, không AppCompat/Compose)
+        Kit.kt               # dp/sp, màu theo theme sáng/tối, KitReleasable
+        LabeledSlider.kt     # label + giá trị + SeekBar (int<->float, bước)
+        ToggleRow.kt         # label + Switch, cao >= 40dp
+        SectionCard.kt       # khung nhóm bo góc + tiêu đề
+        IconButton.kt        # nút biểu tượng >= 40dp
+        TabBar.kt            # thanh tab chia đều bề ngang
+        ColorDot.kt          # chấm trạng thái 8dp
+        Stepper.kt           # label + giá trị + −/+
     ForegroundWatcher.kt     # UsageStats 500 ms, debounce 300 ms
     ReleaseReceiver.kt       # nút "Nhả cảm ứng" trên notification
     SensiTileService.kt      # Quick Settings tile
@@ -168,7 +189,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
    nào được chọn, SELinux mode. Nếu `uinputOpenable=false` → máy không hỗ trợ, **dừng ở đây**.
 2. **Thử 10 giây** — grab đúng 10 giây rồi tự nhả. Kiểm tra cảm ứng vẫn đúng.
 3. Bật **Bật SensiTune** với hệ số 1.00 → phải giống hệt bình thường.
-4. Kéo thanh X/Y (bước 0.05, 0.50–10.00). Bật **Khóa X = Y** nếu muốn hai hệ số bằng nhau.
+4. Kéo thanh X/Y (bước 0.05, 0.50–10.00 trên màn hình chính, 0.50–2.50 trong menu nổi).
+   X = chuyển động **ngang**, Y = chuyển động **dọc** của màn hình hiện tại, tự đổi khi xoay máy.
+   Bật **Khóa X = Y** nếu muốn hai hệ số bằng nhau.
 5. Rời app: mặc định engine **tự nhả**. Muốn chạy tiếp khi ở app khác, bật **Chạy nền**
    (foreground service + notification có nút nhả).
 6. **Chỉ áp dụng trong app đã chọn**: cấp quyền *Usage Access*, chọn app, bật công tắc.
@@ -255,10 +278,13 @@ mà không cần làm gì.
 - FPS lấy từ `dumpsys SurfaceFlinger --list | grep <package>` rồi `--latency <layer>`: bỏ dòng
   refresh period, lấy hiệu `ActualPresentTime` (cột 2, ns) giữa các dòng. Layer không còn → tự
   `--list` lại; không tìm thấy layer → hiện `--`, không báo lỗi.
-- Toạ độ cảm ứng ảo được giữ cách mép màn hình ~1% mỗi trục khi hệ số khác 1.0, tránh vùng
-  gesture/bo góc của hệ thống nuốt mất điểm chạm làm cảm ứng “kẹt góc”. Bản chất touchscreen là
-  toạ độ tuyệt đối nên muốn xoay vô hạn vẫn phải nhấc tay vuốt lại; mỗi lần chạm mới lại lấy mốc
-  tại vị trí ngón và không giữ trạng thái kẹt của lần trước.
+- Kẹt mép khi hệ số > 1.0 được xử lý bằng **soft recenter**: vùng đệm `edgeMargin` (0–25%,
+  mặc định 12%) tính riêng theo chiều dài từng trục thô; trong vùng đệm, offset giảm tuyến tính
+  về 0 nên `virt` luôn đuổi kịp `raw` và vuốt vòng qua mép không bị đứng yên. Clamp cuối cùng vẫn
+  là `[min,max]`, raw ở mép thì virt ở mép. Tuỳ chọn **“Chạm lại ở giữa”** (mặc định tắt) nhấc và
+  chạm lại tại tâm khi chạm mép, tối đa 1 lần/giây — game có thể coi đó là lần chạm mới.
+- Toạ độ thô của panel cố định theo màn hình dọc, nên hệ số X/Y được hoán đổi theo
+  `Display.rotation` (AIDL `setRotation`) và chốt cho từng ngón khi ngón đó bắt đầu chạm.
 - Nhiệt độ lấy từ `/sys/class/thermal` (đọc một lần, cache đường dẫn); zone trả giá trị vô lý
   (ví dụ `-40000`) bị bỏ qua. GPU % bị chặn trên nhiều ROM nên không có ô này.
 
@@ -268,8 +294,13 @@ Bật **Menu nổi** / **Hiện HUD** ở màn hình chính (cần quyền Hiể
 Cả hai overlay do `SensiService` (FGS) host, dùng View thường — không Compose/Fragment.
 
 - **Menu nổi**: nút tròn 48dp, kéo thả, tự dính mép và lưu vị trí. Chạm để mở bảng:
-  - tab **Độ nhạy**: hệ số X/Y bằng nút −/+ (bước 0.05, 0.50–10.00), công tắc Khóa X=Y,
-    nút đỏ **NHẢ**; không dùng slider vì ngón kéo cũng bị nhân hệ số;
+  - tab **Độ nhạy**: **slider** X/Y (bước 0.05, 0.50–2.50) hiển thị giá trị, công tắc Khóa X=Y,
+    thanh `edgeMargin`, công tắc Soft recenter (mặc định bật) và Chạm lại ở giữa (mặc định tắt),
+    chấm đỏ nhỏ báo lỗi gửi, nút đỏ **NHẢ**. Khi bảng mở, menu gọi
+    `setScalingSuspended(true)` (gia hạn mỗi ~2 giây, engine tự hết hạn sau 10 giây) nên slider
+    bám đúng ngón dù engine đang ACTIVE; đóng bảng gọi `false`. Giá trị slider được coalesce
+    (chỉ giá trị mới nhất), debounce ~50 ms, gửi trên HandlerThread riêng, gửi giá trị cuối khi
+    nhả ngón — không gọi Binder trên main thread;
   - tab **HUD**: bật/tắt HUD hiệu năng, bật/tắt **HUD ngày giờ riêng**, bật/tắt từng chỉ số +
     đổi thứ tự bằng ↑/↓, **cỡ chữ dùng chung cho cả 2 HUD**, độ mờ, kiểu hàng ngang/cột dọc,
     ngưỡng vàng/đỏ, khóa/mở khóa vị trí và 4 nút mũi tên 8px.

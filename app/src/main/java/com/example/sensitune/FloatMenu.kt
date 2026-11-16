@@ -1,7 +1,6 @@
 package com.example.sensitune
 
 import android.content.Context
-import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.Handler
@@ -11,11 +10,18 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
-import android.widget.CompoundButton
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.Switch
 import android.widget.TextView
+import com.example.sensitune.ui.kit.ColorDot
+import com.example.sensitune.ui.kit.IconButton
+import com.example.sensitune.ui.kit.Kit
+import com.example.sensitune.ui.kit.KitReleasable
+import com.example.sensitune.ui.kit.LabeledSlider
+import com.example.sensitune.ui.kit.SectionCard
+import com.example.sensitune.ui.kit.Stepper
+import com.example.sensitune.ui.kit.TabBar
+import com.example.sensitune.ui.kit.ToggleRow
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -23,28 +29,41 @@ import kotlin.math.roundToInt
 
 /**
  * Floating bubble + two-tab panel shared by the sensitivity engine and the HUD.
- * Plain views only (no Compose/Fragment/LifecycleOwner), hosted by SensiService.
+ * Plain views only (ui.kit widgets, no Compose/Fragment/LifecycleOwner).
  *
- * No sliders: while the engine is ACTIVE every drag is scaled, so the panel only
- * offers -/+ buttons and switches. Tapping the bubble opens the panel; the panel
- * closes after 5 seconds without touch.
+ * The panel uses real sliders. While it is open the engine is told to suspend
+ * scaling (k=1.0, no soft recenter) but to KEEP the grab, so the handles track the
+ * finger instead of being multiplied. Suspension is renewed every ~2s and the
+ * engine also fails safe after 10s without renewal.
+ *
+ * The Context is wrapped in the dark overlay theme so Switch/SeekBar render
+ * correctly inside a WindowManager window.
  */
 class FloatMenu(
-    private val ctx: Context,
+    appContext: Context,
     private val prefs: Prefs,
     private val cb: Callbacks
 ) {
 
     interface Callbacks {
-        fun onSensitivityChanged()
+        /** Coalesced, debounced preview while dragging (never on the main thread). */
+        fun onFactorPreview(x: Float, y: Float)
+
+        /** Final value when the finger leaves the slider. */
+        fun onFactorCommit(x: Float, y: Float)
+
+        fun onSensitivitySettingsChanged()
+        fun onPanelOpenChanged(open: Boolean)
         fun onEmergencyRelease()
         fun onHudPrefsChanged()
         fun onHudLockChanged()
         fun onHudMove(dx: Int, dy: Int)
         fun engineActive(): Boolean
+        fun factorSendFailed()
     }
 
     private val TAG = "FloatMenu"
+    private val ctx: Context = Kit.overlayTheme(appContext)
     private val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val handler = Handler(Looper.getMainLooper())
 
@@ -58,6 +77,8 @@ class FloatMenu(
     private var panelAttached = false
 
     private var tab = 0 // 0 = sensitivity, 1 = HUD
+    private var statusDot: ColorDot? = null
+    private val kitWidgets = ArrayList<KitReleasable>()
 
     private var downRawX = 0f
     private var downRawY = 0f
@@ -73,6 +94,11 @@ class FloatMenu(
     }
 
     fun isShowing(): Boolean = bubbleAttached
+
+    /** Called by SensiService when a slider value could not be delivered. */
+    fun notifyFactorSendFailed() {
+        statusDot?.setError("Không gửi được hệ số tới engine")
+    }
 
     fun show() {
         if (bubbleAttached) return
@@ -235,7 +261,7 @@ class FloatMenu(
             return
         }
         val size = OverlayUi.screenSize(ctx)
-        val width = min(OverlayUi.dp(ctx, 320f), size.x - OverlayUi.dp(ctx, 24f))
+        val width = min(OverlayUi.dp(ctx, 340f), size.x - OverlayUi.dp(ctx, 24f))
         val frame = TouchFrameLayout(ctx).apply {
             background = OverlayUi.rounded(Color.parseColor("#F2263238"), 14f, ctx)
             setPadding(dp(12f), dp(10f), dp(12f), dp(10f))
@@ -250,27 +276,43 @@ class FloatMenu(
             )
         )
 
-        val titleRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        val titleRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
         titleRow.addView(
             label("SensiTune", 15f, Color.WHITE),
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         )
-        titleRow.addView(smallButton("✕") { closePanel() })
+        titleRow.addView(IconButton(ctx, "✕") { closePanel() })
         column.addView(titleRow)
 
-        val tabRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        tabRow.addView(tabButton("Độ nhạy", 0), weight())
-        tabRow.addView(tabButton("HUD", 1), weight())
-        column.addView(tabRow)
+        val tabBar = TabBar(ctx, listOf("Độ nhạy", "HUD")) { index ->
+            tab = index
+            buildContent()
+            resetAutoClose()
+        }
+        tabBar.select(tab, notify = false)
+        register(tabBar)
+        column.addView(
+            tabBar,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(6f) }
+        )
 
         val scroll = ScrollView(ctx)
-        val content = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        val content = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(2f), 0, dp(2f))
+        }
         scroll.addView(content)
         column.addView(
             scroll,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                min(size.y * 6 / 10, OverlayUi.dp(ctx, 460f))
+                min(size.y * 6 / 10, OverlayUi.dp(ctx, 500f))
             )
         )
         panelContent = content
@@ -304,11 +346,14 @@ class FloatMenu(
             panelAttached = true
             LogBuffer.info(TAG, "panel attached tab=$tab")
             resetAutoClose()
+            // Slider handle must not be scaled while it is being dragged.
+            cb.onPanelOpenChanged(true)
         } catch (t: Throwable) {
             panelAttached = false
             panel = null
             panelContent = null
             LogBuffer.error(TAG, "addView(panel) failed", t)
+            cb.onPanelOpenChanged(false)
         }
     }
 
@@ -316,16 +361,20 @@ class FloatMenu(
         handler.removeCallbacks(closeRunnable)
         val v = panel ?: return
         if (!panelAttached) return
+        val wasAttached = panelAttached
         try {
             wm.removeViewImmediate(v)
         } catch (t: Throwable) {
             LogBuffer.error(TAG, "removeView(panel) failed", t)
         } finally {
+            releasePanelWidgets()
             panelAttached = false
             panel = null
             panelParams = null
             panelContent = null
+            statusDot = null
         }
+        if (wasAttached) cb.onPanelOpenChanged(false)
     }
 
     private fun resetAutoClose() {
@@ -339,6 +388,7 @@ class FloatMenu(
 
     private fun buildContent() {
         val box = panelContent ?: return
+        releasePanelWidgets()
         box.removeAllViews()
         if (tab == 0) buildSensitivityTab(box) else buildHudTab(box)
     }
@@ -347,62 +397,164 @@ class FloatMenu(
         if (cb.engineActive()) {
             box.addView(
                 label(
-                    "⚠ Đang bật Độ nhạy: kéo có thể lệch. Nên tạm tắt hoặc dùng hệ số 1.0 khi chỉnh.\n" +
-                        "Menu dùng nút -/+ nên không bị ảnh hưởng.",
-                    10f, Color.parseColor("#FFAB91")
+                    "Đang bật engine: bảng này tạm ngưng nhân hệ số (vẫn grab) để slider bám ngón. " +
+                        "Đóng bảng là áp dụng lại ngay.",
+                    10f, Color.parseColor("#FFCC80")
                 )
             )
         }
 
-        box.addView(factorRow("Hệ số X", true) { prefs.factorX })
-        box.addView(factorRow("Hệ số Y", false) { prefs.factorY })
+        val statusRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val dot = ColorDot(ctx, Kit.neutral())
+        statusRow.addView(dot)
+        statusRow.addView(
+            label("Chấm đỏ = không gửi được giá trị tới engine", 9f, Color.LTGRAY),
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        box.addView(statusRow)
+        statusDot = dot
 
-        box.addView(
-            Switch(ctx).apply {
-                text = "Khóa X = Y"
-                textSize = 13f
-                setTextColor(Color.WHITE)
-                isChecked = prefs.lockXY
-                setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
+        val factorCard = SectionCard(ctx, "Độ nhạy (X = ngang màn hình, Y = dọc màn hình)")
+        val sliderX = LabeledSlider(ctx, "Hệ số X", 0.50f, 2.50f, 0.05f, prefs.factorX)
+        val sliderY = LabeledSlider(ctx, "Hệ số Y", 0.50f, 2.50f, 0.05f, prefs.factorY)
+
+        sliderX.onChange = { value, fromUser ->
+            if (fromUser) {
+                statusDot?.clear()
+                prefs.factorX = value
+                if (prefs.lockXY) {
+                    prefs.factorY = value
+                    sliderY.setValue(value, notify = false)
+                }
+                cb.onFactorPreview(prefs.factorX, prefs.factorY)
+                resetAutoClose()
+            }
+        }
+        sliderX.onStopTracking = { value ->
+            prefs.factorX = value
+            if (prefs.lockXY) prefs.factorY = value
+            cb.onFactorCommit(prefs.factorX, prefs.factorY)
+            resetAutoClose()
+        }
+        sliderY.onChange = { value, fromUser ->
+            if (fromUser) {
+                statusDot?.clear()
+                prefs.factorY = value
+                if (prefs.lockXY) {
+                    prefs.factorX = value
+                    sliderX.setValue(value, notify = false)
+                }
+                cb.onFactorPreview(prefs.factorX, prefs.factorY)
+                resetAutoClose()
+            }
+        }
+        sliderY.onStopTracking = { value ->
+            prefs.factorY = value
+            if (prefs.lockXY) prefs.factorX = value
+            cb.onFactorCommit(prefs.factorX, prefs.factorY)
+            resetAutoClose()
+        }
+        register(sliderX)
+        register(sliderY)
+        factorCard.addRow(sliderX)
+        factorCard.addRow(sliderY)
+        factorCard.addRow(
+            ToggleRow(ctx, "Khóa X = Y", prefs.lockXY).also { row ->
+                register(row)
+                row.onCheckedChange = { checked ->
                     prefs.lockXY = checked
                     if (checked) {
                         prefs.factorY = prefs.factorX
-                        cb.onSensitivityChanged()
-                        buildContent()
+                        sliderY.setValue(prefs.factorX, notify = false)
+                        cb.onFactorCommit(prefs.factorX, prefs.factorY)
                     }
+                    LogBuffer.info(TAG, "lock X=Y -> $checked")
                     resetAutoClose()
                 }
             }
         )
+        factorCard.addRow(sectionHint("0.50 – 2.50 · bước 0.05 · 1.00 = giữ nguyên"))
+        box.addView(factorCard, topMargin())
+        register(factorCard)
 
-        box.addView(
-            label("Bước 0.05 · phạm vi 0.50 – 10.00 · 1.00 = giữ nguyên", 10f, Color.LTGRAY)
+        val edgeCard = SectionCard(ctx, "Mép màn hình & xoay")
+        val marginSlider = LabeledSlider(
+            ctx, "Vùng đệm mép (%)", 0f, 25f, 1f, prefs.edgeMarginPct.toFloat()
+        ).also { slider ->
+            slider.onChange = { value, fromUser ->
+                if (fromUser) {
+                    prefs.edgeMarginPct = value.roundToInt()
+                    cb.onSensitivitySettingsChanged()
+                    resetAutoClose()
+                }
+            }
+            slider.onStopTracking = {
+                cb.onSensitivitySettingsChanged()
+                resetAutoClose()
+            }
+            register(slider)
+        }
+        edgeCard.addRow(marginSlider)
+        edgeCard.addRow(
+            ToggleRow(ctx, "Soft recenter (giảm dần sát mép)", prefs.softRecenter).also { row ->
+                register(row)
+                row.onCheckedChange = { checked ->
+                    prefs.softRecenter = checked
+                    cb.onSensitivitySettingsChanged()
+                    resetAutoClose()
+                }
+            }
         )
+        val reanchorWarning = sectionHint(
+            "⚠ Chạm lại ở giữa: game có thể coi đó là một lần chạm MỚI (tối đa 1 lần/giây)."
+        )
+        val reanchorRow = ToggleRow(
+            ctx, "Chạm lại ở giữa khi chạm mép", prefs.reanchor
+        ).also { row ->
+            register(row)
+            row.onCheckedChange = { checked ->
+                prefs.reanchor = checked
+                reanchorWarning.visibility = if (checked) View.VISIBLE else View.GONE
+                cb.onSensitivitySettingsChanged()
+                resetAutoClose()
+            }
+        }
+        edgeCard.addRow(reanchorRow)
+        reanchorWarning.visibility = if (prefs.reanchor) View.VISIBLE else View.GONE
+        edgeCard.addRow(reanchorWarning)
+        edgeCard.addRow(sectionHint("Vùng đệm tính theo % chiều dài từng trục thô (X ngắn hơn Y)."))
+        box.addView(edgeCard, topMargin())
+        register(edgeCard)
 
         box.addView(
             Button(ctx).apply {
                 text = "NHẢ CẢM ỨNG NGAY"
-                textSize = 13f
+                textSize = 14f
                 setTextColor(Color.WHITE)
-                backgroundTintList = ColorStateList.valueOf(Color.parseColor("#D32F2F"))
+                background.setTint(Kit.danger())
+                minimumHeight = dp(56f)
                 setOnClickListener {
                     LogBuffer.warn(TAG, "emergency release from floating menu")
                     cb.onEmergencyRelease()
                     closePanel()
                 }
             },
-            topMargin()
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(56f)
+            ).apply { topMargin = dp(10f) }
         )
     }
 
     private fun buildHudTab(box: LinearLayout) {
-        box.addView(
-            Switch(ctx).apply {
-                text = "Hiện HUD"
-                textSize = 13f
-                setTextColor(Color.WHITE)
-                isChecked = prefs.hudEnabled
-                setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
+        val hudCard = SectionCard(ctx, "HUD")
+        hudCard.addRow(
+            ToggleRow(ctx, "Hiện HUD", prefs.hudEnabled).also { row ->
+                register(row)
+                row.onCheckedChange = { checked ->
                     prefs.hudEnabled = checked
                     LogBuffer.info(TAG, "hudEnabled -> $checked")
                     cb.onHudPrefsChanged()
@@ -410,90 +562,99 @@ class FloatMenu(
                 }
             }
         )
-
-        box.addView(
-            Switch(ctx).apply {
-                text = "Hiện HUD ngày giờ (Fri Jun 7 12:59:59)"
-                textSize = 13f
-                setTextColor(Color.WHITE)
-                isChecked = prefs.clockHudEnabled
-                setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
+        hudCard.addRow(
+            ToggleRow(ctx, "HUD ngày giờ (Fri Jun 7 12:59:59)", prefs.clockHudEnabled).also { row ->
+                register(row)
+                row.onCheckedChange = { checked ->
                     prefs.clockHudEnabled = checked
                     LogBuffer.info(TAG, "clockHudEnabled -> $checked")
                     cb.onHudPrefsChanged()
                     resetAutoClose()
                 }
-            },
-            topMargin()
+            }
         )
-
-        box.addView(
-            Button(ctx).apply {
-                text = if (prefs.hudLocked) "🔒 Đang khóa vị trí — mở khóa" else "🔓 Đang mở khóa — khóa lại"
-                textSize = 12f
-                setOnClickListener {
-                    prefs.hudLocked = !prefs.hudLocked
+        hudCard.addRow(
+            ToggleRow(ctx, "Khóa vị trí HUD", prefs.hudLocked).also { row ->
+                register(row)
+                row.onCheckedChange = { checked ->
+                    prefs.hudLocked = checked
                     cb.onHudLockChanged()
                     buildContent()
+                    resetAutoClose()
                 }
-            },
-            topMargin()
+            }
         )
+        box.addView(hudCard, topMargin())
+        register(hudCard)
 
         if (!prefs.hudLocked) {
-            box.addView(
-                label(
-                    "Đang bật Độ nhạy: kéo HUD có thể lệch, nên tạm tắt hoặc dùng hệ số 1.0. " +
-                        "Nút mũi tên bên dưới chỉnh chính xác 8px/lần.",
-                    10f, Color.parseColor("#FFAB91")
-                )
-            )
-            val arrows = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-            arrows.addView(smallButton("↑") { cb.onHudMove(0, -8); resetAutoClose() })
-            arrows.addView(smallButton("↓") { cb.onHudMove(0, 8); resetAutoClose() })
-            arrows.addView(smallButton("←") { cb.onHudMove(-8, 0); resetAutoClose() })
-            arrows.addView(smallButton("→") { cb.onHudMove(8, 0); resetAutoClose() })
-            box.addView(arrows)
+            val arrowsCard = SectionCard(ctx, "Di chuyển HUD (8px mỗi lần)")
+            val arrows = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            arrows.addView(IconButton(ctx, "↑") { cb.onHudMove(0, -8); resetAutoClose() }, arrowParams())
+            arrows.addView(IconButton(ctx, "↓") { cb.onHudMove(0, 8); resetAutoClose() }, arrowParams())
+            arrows.addView(IconButton(ctx, "←") { cb.onHudMove(-8, 0); resetAutoClose() }, arrowParams())
+            arrows.addView(IconButton(ctx, "→") { cb.onHudMove(8, 0); resetAutoClose() }, arrowParams())
+            arrowsCard.addRow(arrows)
+            box.addView(arrowsCard, topMargin())
+            register(arrowsCard)
         }
 
-        val orientationRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        orientationRow.addView(
-            Button(ctx).apply {
-                text = if (prefs.hudVertical) "Kiểu: cột dọc" else "Kiểu: hàng ngang"
-                textSize = 12f
-                setOnClickListener {
-                    prefs.hudVertical = !prefs.hudVertical
-                    cb.onHudPrefsChanged()
-                    buildContent()
-                }
-            },
-            weight()
+        val styleCard = SectionCard(ctx, "Kiểu hiển thị")
+        styleCard.addRow(
+            Stepper(
+                ctx,
+                "Cỡ chữ (cả 2 HUD)",
+                "%.2f".format(prefs.hudTextScale)
+            ) { delta ->
+                prefs.hudTextScale = (prefs.hudTextScale + delta).coerceIn(0.7f, 1.8f)
+                cb.onHudPrefsChanged()
+                buildContent()
+                resetAutoClose()
+            }.also { register(it) }
         )
-        box.addView(orientationRow)
+        styleCard.addRow(
+            Stepper(ctx, "Độ mờ", "%.2f".format(prefs.hudAlpha)) { delta ->
+                prefs.hudAlpha = (prefs.hudAlpha + delta).coerceIn(0.2f, 0.8f)
+                cb.onHudPrefsChanged()
+                buildContent()
+                resetAutoClose()
+            }.also { register(it) }
+        )
+        styleCard.addRow(
+            ToggleRow(ctx, if (prefs.hudVertical) "Kiểu: cột dọc" else "Kiểu: hàng ngang", prefs.hudVertical)
+                .also { row ->
+                    register(row)
+                    row.onCheckedChange = { checked ->
+                        prefs.hudVertical = checked
+                        cb.onHudPrefsChanged()
+                        buildContent()
+                        resetAutoClose()
+                    }
+                }
+        )
+        styleCard.addRow(
+            Stepper(ctx, "Ngưỡng vàng", "%.0f°C".format(prefs.tempWarnC)) { delta ->
+                prefs.tempWarnC = (prefs.tempWarnC + delta * 10f).coerceIn(30f, 90f)
+                cb.onHudPrefsChanged()
+                buildContent()
+                resetAutoClose()
+            }.also { register(it) }
+        )
+        styleCard.addRow(
+            Stepper(ctx, "Ngưỡng đỏ", "%.0f°C".format(prefs.tempCritC)) { delta ->
+                prefs.tempCritC = (prefs.tempCritC + delta * 10f).coerceIn(35f, 100f)
+                cb.onHudPrefsChanged()
+                buildContent()
+                resetAutoClose()
+            }.also { register(it) }
+        )
+        box.addView(styleCard, topMargin())
+        register(styleCard)
 
-        box.addView(stepperRow("Cỡ chữ (cả 2 HUD)", "%.2f".format(prefs.hudTextScale)) {
-            prefs.hudTextScale = (prefs.hudTextScale + it).coerceIn(0.7f, 1.8f)
-            cb.onHudPrefsChanged()
-            buildContent()
-        })
-        box.addView(stepperRow("Độ mờ", "%.2f".format(prefs.hudAlpha)) {
-            prefs.hudAlpha = (prefs.hudAlpha + it).coerceIn(0.2f, 0.8f)
-            cb.onHudPrefsChanged()
-            buildContent()
-        })
-        box.addView(stepperRow("Ngưỡng vàng", "%.0f°C".format(prefs.tempWarnC)) {
-            prefs.tempWarnC = (prefs.tempWarnC + it * 10f).coerceIn(30f, 90f)
-            cb.onHudPrefsChanged()
-            buildContent()
-        })
-        box.addView(stepperRow("Ngưỡng đỏ", "%.0f°C".format(prefs.tempCritC)) {
-            prefs.tempCritC = (prefs.tempCritC + it * 10f).coerceIn(35f, 100f)
-            cb.onHudPrefsChanged()
-            buildContent()
-        })
-
-        box.addView(label("Chỉ số (bật/tắt, đổi thứ tự bằng ↑/↓)", 11f, Color.LTGRAY))
-
+        val metricsCard = SectionCard(ctx, "Chỉ số (bật/tắt, đổi thứ tự bằng mũi tên)")
         val metrics = prefs.hudMetrics()
         for ((index, entry) in metrics.withIndex()) {
             val row = LinearLayout(ctx).apply {
@@ -502,12 +663,9 @@ class FloatMenu(
             }
             val metric = OverlayUi.metric(entry.first)
             row.addView(
-                Switch(ctx).apply {
-                    text = metric?.label ?: entry.first
-                    textSize = 12f
-                    setTextColor(Color.WHITE)
-                    isChecked = entry.second
-                    setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
+                ToggleRow(ctx, metric?.label ?: entry.first, entry.second).also { toggle ->
+                    register(toggle)
+                    toggle.onCheckedChange = { checked ->
                         val current = prefs.hudMetrics().toMutableList()
                         if (index in current.indices) {
                             current[index] = Pair(current[index].first, checked)
@@ -519,20 +677,17 @@ class FloatMenu(
                 },
                 LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             )
-            row.addView(smallButton("↑") {
-                reorder(index, -1)
-            })
-            row.addView(smallButton("↓") {
-                reorder(index, 1)
-            })
-            box.addView(row)
+            row.addView(IconButton(ctx, "↑") { reorder(index, -1) })
+            row.addView(IconButton(ctx, "↓") { reorder(index, 1) })
+            metricsCard.addRow(row)
         }
+        box.addView(metricsCard, topMargin())
+        register(metricsCard)
 
         box.addView(
-            label(
-                "FPS đọc từ SurfaceFlinger (dumpsys --latency, hiệu ActualPresentTime của layer app đang chạy). " +
-                    "HUD ngày giờ là cửa sổ riêng, không chung với nhiệt độ/CPU/GPU.",
-                9f, Color.LTGRAY
+            sectionHint(
+                "FPS đọc từ SurfaceFlinger (dumpsys --latency, hiệu ActualPresentTime của layer " +
+                    "app đang chạy). HUD ngày giờ là cửa sổ riêng."
             )
         )
     }
@@ -548,58 +703,25 @@ class FloatMenu(
         buildContent()
     }
 
-    private fun factorRow(title: String, isX: Boolean, value: () -> Float): LinearLayout {
-        val row = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        row.addView(
-            label(title, 13f, Color.WHITE),
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        )
-        row.addView(smallButton("−") { adjust(isX, -0.05f) })
-        row.addView(label("%.2f".format(value()), 15f, Color.WHITE))
-        row.addView(smallButton("+") { adjust(isX, 0.05f) })
-        return row
-    }
-
-    private fun stepperRow(title: String, current: String, onChange: (Float) -> Unit): LinearLayout {
-        val row = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        row.addView(
-            label(title, 12f, Color.WHITE),
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        )
-        row.addView(smallButton("−") { onChange(-0.1f) })
-        row.addView(label(current, 12f, Color.WHITE))
-        row.addView(smallButton("+") { onChange(0.1f) })
-        return row
-    }
-
-    private fun adjust(isX: Boolean, delta: Float) {
-        val base = if (isX) prefs.factorX else prefs.factorY
-        val v = quantize(base + delta)
-        if (prefs.lockXY) {
-            prefs.factorX = v
-            prefs.factorY = v
-        } else if (isX) {
-            prefs.factorX = v
-        } else {
-            prefs.factorY = v
-        }
-        LogBuffer.info(TAG, "factor ${if (isX) "X" else "Y"} -> $v (lock=${prefs.lockXY})")
-        cb.onSensitivityChanged()
-        buildContent()
-    }
-
-    private fun quantize(v: Float): Float =
-        ((v * 20f).roundToInt() / 20f).coerceIn(0.5f, 10f)
-
     // ------------------------------------------------------------------
     // Small view helpers
     // ------------------------------------------------------------------
+
+    private fun register(widget: KitReleasable) {
+        kitWidgets.add(widget)
+    }
+
+    private fun releasePanelWidgets() {
+        for (widget in kitWidgets) {
+            try {
+                widget.release()
+            } catch (t: Throwable) {
+                LogBuffer.error(TAG, "widget release failed", t)
+            }
+        }
+        kitWidgets.clear()
+        statusDot = null
+    }
 
     private fun label(text: String, size: Float, color: Int): TextView = TextView(ctx).apply {
         this.text = text
@@ -608,42 +730,18 @@ class FloatMenu(
         setPadding(dp(2f), dp(4f), dp(2f), dp(4f))
     }
 
-    private fun smallButton(text: String, onClick: () -> Unit): Button = Button(ctx).apply {
-        this.text = text
-        textSize = 12f
-        minWidth = 0
-        minimumWidth = 0
-        minHeight = 0
-        minimumHeight = 0
-        setPadding(dp(8f), dp(2f), dp(8f), dp(2f))
-        setOnClickListener {
-            resetAutoClose()
-            onClick()
-        }
-    }
+    private fun sectionHint(text: String): TextView = label(text, 9f, Color.LTGRAY)
 
-    private fun tabButton(text: String, index: Int): Button = Button(ctx).apply {
-        this.text = text
-        textSize = 12f
-        backgroundTintList = ColorStateList.valueOf(
-            if (tab == index) Color.parseColor("#455A64") else Color.parseColor("#263238")
-        )
-        setTextColor(Color.WHITE)
-        setOnClickListener {
-            tab = index
-            buildContent()
-            resetAutoClose()
+    private fun arrowParams(): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(dp(40f), dp(40f)).apply {
+            marginEnd = dp(6f)
         }
-    }
-
-    private fun weight(): LinearLayout.LayoutParams =
-        LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
 
     private fun topMargin(): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(6f) }
+        ).apply { topMargin = dp(8f) }
 
     private fun dp(v: Float): Int = OverlayUi.dp(ctx, v)
 

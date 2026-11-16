@@ -12,6 +12,11 @@ object NativeBridge {
     @JvmStatic external fun stop(reason: String): Int
     @JvmStatic external fun setEnabled(enabled: Boolean): Int
     @JvmStatic external fun setFactor(x: Float, y: Float): Int
+    @JvmStatic external fun setRotation(rotation: Int): Int
+    @JvmStatic external fun setScalingSuspended(suspended: Boolean): Int
+    @JvmStatic external fun setEdgeMargin(percent: Int): Int
+    @JvmStatic external fun setSoftRecenter(enabled: Boolean): Int
+    @JvmStatic external fun setReanchor(enabled: Boolean): Int
     @JvmStatic external fun heartbeat(): Int
     @JvmStatic external fun emergencyRelease(reason: String): Int
     @JvmStatic external fun getStatus(): String

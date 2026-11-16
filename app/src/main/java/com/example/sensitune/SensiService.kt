@@ -10,6 +10,7 @@ import android.app.usage.UsageStatsManager
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -17,6 +18,8 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.view.Display
+import android.view.Surface
 import org.json.JSONObject
 
 /**
@@ -58,6 +61,56 @@ class SensiService : Service(), ShizukuHelper.Listener {
     private var lastPerfCsv = ""
     private var lastPerfPkg: String? = null
 
+    // Binder I/O thread: rotation, suspend and coalesced slider values must never
+    // run on the main thread.
+    private var ioThread: HandlerThread? = null
+
+    @Volatile
+    private var ioHandler: Handler? = null
+
+    private val factorLock = Any()
+    private var pendingFactorX = 1.0f
+    private var pendingFactorY = 1.0f
+    private var factorPending = false
+
+    @Volatile
+    private var panelOpen = false
+
+    private val factorSendRunnable = Runnable {
+        val x: Float
+        val y: Float
+        synchronized(factorLock) {
+            if (!factorPending) return@Runnable
+            factorPending = false
+            x = pendingFactorX
+            y = pendingFactorY
+        }
+        val ok = ShizukuHelper.setFactor(x, y)
+        if (!ok) handler.post { menu?.notifyFactorSendFailed() }
+    }
+
+    private val suspendRenewRunnable = object : Runnable {
+        override fun run() {
+            if (!panelOpen) return
+            if (!ShizukuHelper.setScalingSuspended(true)) {
+                handler.post { menu?.notifyFactorSendFailed() }
+            }
+            ioHandler?.postDelayed(this, SUSPEND_RENEW_MS)
+        }
+    }
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId != Display.DEFAULT_DISPLAY) return
+            val rotation = currentRotation()
+            LogBuffer.info(TAG, "display rotation changed -> $rotation")
+            postRotation()
+        }
+    }
+
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
             if (!heartbeatRunning) return
@@ -93,6 +146,101 @@ class SensiService : Service(), ShizukuHelper.Listener {
             perfThread = null
             perfHandler = null
             LogBuffer.error(TAG, "perf sampler thread failed", t)
+        }
+
+        ensureIo()
+        try {
+            val dm = getSystemService(DisplayManager::class.java)
+            dm?.registerDisplayListener(displayListener, handler)
+            LogBuffer.info(TAG, "display listener registered, rotation=${currentRotation()}")
+        } catch (t: Throwable) {
+            LogBuffer.error(TAG, "registerDisplayListener failed", t)
+        }
+        // The service can be recreated while the engine is enabled; the new
+        // shell process needs the current rotation before the first touch.
+        postRotation()
+    }
+
+    // ------------------------------------------------------------------
+    // Binder I/O thread + rotation
+    // ------------------------------------------------------------------
+
+    private fun ensureIo(): Handler? {
+        val existing = ioHandler
+        if (existing != null && ioThread?.isAlive == true) return existing
+        return try {
+            val t = HandlerThread("binder-io").also { it.start() }
+            ioThread = t
+            val h = Handler(t.looper)
+            ioHandler = h
+            LogBuffer.info(TAG, "binder I/O thread started")
+            h
+        } catch (t: Throwable) {
+            ioThread = null
+            ioHandler = null
+            LogBuffer.error(TAG, "binder I/O thread failed", t)
+            null
+        }
+    }
+
+    private fun postIo(tag: String, block: () -> Unit) {
+        val h = ensureIo() ?: return
+        h.post {
+            try {
+                block()
+            } catch (t: Throwable) {
+                LogBuffer.error(TAG, "$tag failed", t)
+            }
+        }
+    }
+
+    private fun currentRotation(): Int = try {
+        val dm = getSystemService(DisplayManager::class.java)
+        dm?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: Surface.ROTATION_0
+    } catch (t: Throwable) {
+        Surface.ROTATION_0
+    }
+
+    private fun postRotation() {
+        val rotation = currentRotation()
+        postIo("setRotation($rotation)") { ShizukuHelper.setRotation(rotation) }
+    }
+
+    /** Rotation first, then all engine settings, then (optionally) enable. */
+    private fun pushEngineConfig(reason: String, enableAfter: Boolean, fx: Float, fy: Float) {
+        val rotation = currentRotation()
+        postIo("engine config ($reason)") {
+            ShizukuHelper.setRotation(rotation)
+            ShizukuHelper.setEdgeMargin(prefs.edgeMarginPct)
+            ShizukuHelper.setSoftRecenter(prefs.softRecenter)
+            ShizukuHelper.setReanchor(prefs.reanchor)
+            ShizukuHelper.setFactor(fx, fy)
+            if (enableAfter) ShizukuHelper.setEnabled(true)
+        }
+    }
+
+    /** Latest value wins; ~50 ms debounce; the final value is sent on finger up. */
+    private fun queueFactor(x: Float, y: Float, immediate: Boolean) {
+        synchronized(factorLock) {
+            pendingFactorX = x
+            pendingFactorY = y
+            factorPending = true
+        }
+        val h = ensureIo() ?: return
+        h.removeCallbacks(factorSendRunnable)
+        if (immediate) h.post(factorSendRunnable) else h.postDelayed(factorSendRunnable, FACTOR_DEBOUNCE_MS)
+    }
+
+    private fun setPanelOpen(open: Boolean) {
+        panelOpen = open
+        val h = ensureIo() ?: return
+        h.removeCallbacks(suspendRenewRunnable)
+        if (open) {
+            LogBuffer.info(TAG, "floating panel open -> scaling suspended (grab stays active)")
+            h.post(suspendRenewRunnable)
+        } else {
+            LogBuffer.info(TAG, "floating panel closed -> scaling resumed")
+            h.post { ShizukuHelper.setScalingSuspended(false) }
         }
     }
 
@@ -250,15 +398,14 @@ class SensiService : Service(), ShizukuHelper.Listener {
                     "entering target $pkg: applying X=$fx Y=$fy " +
                         "(override=${override != null})"
                 )
-                ShizukuHelper.setFactor(fx, fy)
-                ShizukuHelper.setEnabled(true)
+                pushEngineConfig("target $pkg", true, fx, fy)
                 engineOn = true
                 hud?.setEngineActive(true)
                 updateNotification(getString(R.string.notif_active_in, pkg))
             } else {
                 if (engineOn) {
                     LogBuffer.info(TAG, "leaving target app -> releasing grab to IDLE")
-                    ShizukuHelper.setEnabled(false)
+                    postIo("disable on leaving target") { ShizukuHelper.setEnabled(false) }
                     engineOn = false
                     hud?.setEngineActive(false)
                 }
@@ -272,8 +419,7 @@ class SensiService : Service(), ShizukuHelper.Listener {
     private fun applyGlobalFactorAndEnable(reason: String) {
         try {
             LogBuffer.info(TAG, "enabling engine: $reason (X=${prefs.factorX}, Y=${prefs.factorY})")
-            ShizukuHelper.setFactor(prefs.factorX, prefs.factorY)
-            ShizukuHelper.setEnabled(true)
+            pushEngineConfig(reason, true, prefs.factorX, prefs.factorY)
             engineOn = true
             hud?.setEngineActive(true)
             updateNotification(getString(R.string.notif_running_text))
@@ -288,6 +434,9 @@ class SensiService : Service(), ShizukuHelper.Listener {
             stopHeartbeat()
             watcher?.stop()
             watcher = null
+            panelOpen = false
+            ioHandler?.removeCallbacks(suspendRenewRunnable)
+            postIo("clear scaling suspension") { ShizukuHelper.setScalingSuspended(false) }
             ShizukuHelper.emergencyRelease(reason)
             engineOn = false
             hud?.setEngineActive(false)
@@ -304,12 +453,27 @@ class SensiService : Service(), ShizukuHelper.Listener {
         prefs.hudEnabled || prefs.clockHudEnabled || prefs.floatMenuEnabled
 
     private val menuCallbacks = object : FloatMenu.Callbacks {
-        override fun onSensitivityChanged() {
-            try {
-                ShizukuHelper.setFactor(prefs.factorX, prefs.factorY)
-            } catch (t: Throwable) {
-                LogBuffer.error(TAG, "menu setFactor failed", t)
+        override fun onFactorPreview(x: Float, y: Float) {
+            queueFactor(x, y, immediate = false)
+        }
+
+        override fun onFactorCommit(x: Float, y: Float) {
+            queueFactor(x, y, immediate = true)
+        }
+
+        override fun onSensitivitySettingsChanged() {
+            val margin = prefs.edgeMarginPct
+            val soft = prefs.softRecenter
+            val reanchor = prefs.reanchor
+            postIo("sensitivity settings") {
+                ShizukuHelper.setEdgeMargin(margin)
+                ShizukuHelper.setSoftRecenter(soft)
+                ShizukuHelper.setReanchor(reanchor)
             }
+        }
+
+        override fun onPanelOpenChanged(open: Boolean) {
+            setPanelOpen(open)
         }
 
         override fun onEmergencyRelease() {
@@ -339,6 +503,10 @@ class SensiService : Service(), ShizukuHelper.Listener {
         }
 
         override fun engineActive(): Boolean = engineOn
+
+        override fun factorSendFailed() {
+            // The panel already shows its red dot; nothing else to do here.
+        }
     }
 
     /** Brings overlay windows in sync with Prefs; safe to call repeatedly. */
@@ -538,6 +706,15 @@ class SensiService : Service(), ShizukuHelper.Listener {
         try {
             releaseAll("service onDestroy")
             destroyOverlays()
+            try {
+                getSystemService(DisplayManager::class.java)?.unregisterDisplayListener(displayListener)
+            } catch (t: Throwable) {
+                LogBuffer.error(TAG, "unregisterDisplayListener failed", t)
+            }
+            ioHandler?.removeCallbacksAndMessages(null)
+            ioThread?.quitSafely()
+            ioThread = null
+            ioHandler = null
             perfThread?.quitSafely()
             perfThread = null
             perfHandler = null
@@ -587,9 +764,10 @@ class SensiService : Service(), ShizukuHelper.Listener {
 
     override fun onServiceChanged(bound: Boolean) {
         LogBuffer.info(TAG, "UserService bound=$bound")
-        // A new shell process has a fresh per-sampler config; force a re-send.
+        // A new shell process has a fresh config; rotation must be re-sent first.
         lastPerfCsv = ""
         lastPerfPkg = null
+        if (bound) postRotation()
         if (bound && prefs.enabled && !prefs.onlyInSelectedApps) {
             applyGlobalFactorAndEnable("service rebound")
         }
@@ -604,6 +782,8 @@ class SensiService : Service(), ShizukuHelper.Listener {
         const val NOTIF_ID = 1001
         private const val HEARTBEAT_INTERVAL_MS = 1000L
         private const val PERF_INTERVAL_MS = 1000L
+        private const val FACTOR_DEBOUNCE_MS = 50L
+        private const val SUSPEND_RENEW_MS = 2000L
 
         /** Foreground package seen by the watcher, exposed for the debug screen. */
         @Volatile

@@ -38,8 +38,16 @@
     <string name="factor_y_default">Hệ số Y: 1.00</string>
     <string name="factor_x_value">Hệ số X: %1$.2f</string>
     <string name="factor_y_value">Hệ số Y: %1$.2f</string>
-    <string name="factor_range_hint">Phạm vi 0.50 – 10.00, bước 0.05. 1.00 = giữ nguyên.</string>
+    <string name="factor_range_hint">Phạm vi 0.50 – 10.00, bước 0.05. 1.00 = giữ nguyên. X = chuyển động ngang, Y = chuyển động dọc của màn hình hiện tại (tự đổi theo xoay máy).</string>
     <string name="lock_xy">Khóa X = Y</string>
+    <string name="sensitivity_section">Độ nhạy</string>
+    <string name="swipe_section">Vuốt &amp; mép màn hình</string>
+    <string name="factor_x_horizontal">Hệ số X (ngang)</string>
+    <string name="factor_y_vertical">Hệ số Y (dọc)</string>
+    <string name="edge_margin_label">Vùng đệm mép (% mỗi trục)</string>
+    <string name="soft_recenter_label">Soft recenter (giảm dần sát mép)</string>
+    <string name="reanchor_label">Chạm lại ở giữa khi chạm mép</string>
+    <string name="reanchor_warning">Cảnh báo: game có thể coi lần chạm lại là một lần chạm MỚI. Tối đa 1 lần/giây, mặc định tắt.</string>
 
     <!-- Test -->
     <string name="test_start">Thử 10 giây</string>
@@ -100,6 +108,10 @@
     <string name="debug_engine_state">Trạng thái engine: %1$s</string>
     <string name="debug_device">Thiết bị cảm ứng: %1$s</string>
     <string name="debug_factor">Hệ số hiện tại: X=%1$.2f Y=%2$.2f</string>
+    <string name="debug_rotation">Rotation: %1$d (%2$s)</string>
+    <string name="debug_swipe">Mép: %1$d%% | soft recenter: %2$s | suspend: %3$s</string>
+    <string name="orientation_portrait">dọc</string>
+    <string name="orientation_landscape">ngang</string>
     <string name="debug_perf">Event/giây: %1$d | trễ TB %2$d µs | max %3$d µs</string>
     <string name="debug_counters">Gói bị drop: %1$d | EAGAIN: %2$d</string>
     <string name="debug_heartbeat">Heartbeat cách đây: %1$s</string>
@@ -122,7 +134,7 @@
     <string name="picker_saved">Đã lưu %1$d app mục tiêu</string>
     <string name="picker_factor_button">Hệ số</string>
     <string name="picker_use_global">Hệ số: dùng chung</string>
-    <string name="picker_factor_hint">Để trống cả hai ô để dùng hệ số chung. Giá trị hợp lệ 0.5 – 10.0.</string>
+    <string name="picker_factor_hint">Chọn hệ số riêng cho app này (0.50 – 10.00), hoặc bấm “Bỏ hệ số riêng” để dùng hệ số chung.</string>
     <string name="picker_factor_x">Hệ số X</string>
     <string name="picker_factor_y">Hệ số Y</string>
     <string name="picker_factor_x_hint">X (0.5 – 10.0)</string>

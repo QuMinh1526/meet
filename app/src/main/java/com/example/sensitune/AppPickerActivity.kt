@@ -12,9 +12,12 @@ import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
+import com.example.sensitune.ui.kit.LabeledSlider
+import com.example.sensitune.ui.kit.SectionCard
 
 /**
  * Picks target apps for "chỉ trong app đã chọn" and optional per-app X/Y factors.
@@ -131,43 +134,30 @@ class AppPickerActivity : Activity() {
     }
 
     private fun editFactor(row: AppRow) {
-        val container = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(48, 16, 48, 0)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 16, 40, 0)
         }
-        val etX = EditText(this).apply {
-            hint = getString(R.string.picker_factor_x_hint)
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER or
-                android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
-            row.override?.let { setText(String.format(java.util.Locale.US, "%.2f", it.first)) }
-        }
-        val etY = EditText(this).apply {
-            hint = getString(R.string.picker_factor_y_hint)
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER or
-                android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
-            row.override?.let { setText(String.format(java.util.Locale.US, "%.2f", it.second)) }
-        }
-        container.addView(TextView(this).apply { text = getString(R.string.picker_factor_hint) })
-        container.addView(TextView(this).apply { text = getString(R.string.picker_factor_x) })
-        container.addView(etX)
-        container.addView(TextView(this).apply { text = getString(R.string.picker_factor_y) })
-        container.addView(etY)
+        val card = SectionCard(this, getString(R.string.picker_factor_hint))
+        val start = row.override ?: Pair(1.0f, 1.0f)
+        val sliderX = LabeledSlider(
+            this, getString(R.string.factor_x_horizontal), 0.5f, 10f, 0.05f, start.first
+        )
+        val sliderY = LabeledSlider(
+            this, getString(R.string.factor_y_vertical), 0.5f, 10f, 0.05f, start.second
+        )
+        card.addRow(sliderX)
+        card.addRow(sliderY)
+        container.addView(card)
 
-        AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle(row.label)
             .setView(container)
             .setPositiveButton(android.R.string.ok) { _, _ ->
-                val x = etX.text.toString().trim().toFloatOrNull()
-                val y = etY.text.toString().trim().toFloatOrNull()
-                if (x == null || y == null) {
-                    row.override = null
-                    toast(getString(R.string.picker_override_cleared))
-                } else {
-                    val cx = x.coerceIn(0.5f, 10f)
-                    val cy = y.coerceIn(0.5f, 10f)
-                    row.override = Pair(cx, cy)
-                    toast(getString(R.string.picker_override_set, cx, cy))
-                }
+                val cx = sliderX.currentValue().coerceIn(0.5f, 10f)
+                val cy = sliderY.currentValue().coerceIn(0.5f, 10f)
+                row.override = Pair(cx, cy)
+                toast(getString(R.string.picker_override_set, cx, cy))
                 adapter.notifyDataSetChanged()
             }
             .setNeutralButton(R.string.picker_clear_override) { _, _ ->
@@ -175,7 +165,13 @@ class AppPickerActivity : Activity() {
                 adapter.notifyDataSetChanged()
             }
             .setNegativeButton(android.R.string.cancel, null)
-            .show()
+            .create()
+        dialog.setOnDismissListener {
+            sliderX.release()
+            sliderY.release()
+            card.release()
+        }
+        dialog.show()
     }
 
     private fun toast(msg: String) {

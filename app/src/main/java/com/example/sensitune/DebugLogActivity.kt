@@ -303,6 +303,26 @@ class DebugLogActivity : Activity() {
                     o.optDouble("factorY", 1.0)
                 )
             )
+            val rotation = o.optInt("rotation", 0)
+            sb.appendLine(
+                getString(
+                    R.string.debug_rotation,
+                    rotation,
+                    if (rotation == 1 || rotation == 3) {
+                        getString(R.string.orientation_landscape)
+                    } else {
+                        getString(R.string.orientation_portrait)
+                    }
+                )
+            )
+            sb.appendLine(
+                getString(
+                    R.string.debug_swipe,
+                    o.optInt("edgeMarginPct", 12),
+                    if (o.optBoolean("softRecenter", true)) "ON" else "OFF",
+                    if (o.optBoolean("suspended", false)) "ON" else "OFF"
+                )
+            )
             sb.appendLine(
                 getString(
                     R.string.debug_perf,
